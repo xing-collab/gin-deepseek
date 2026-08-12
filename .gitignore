@@ -1,0 +1,15 @@
+# Binary
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# IDE
+.idea/
+
+# Logs
+log/
+
+# Test binary
+test/

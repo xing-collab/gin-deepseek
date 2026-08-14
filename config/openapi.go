@@ -8,38 +8,45 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
+	"os"
 	"strings"
 )
 
 const (
-	defaultResponsesURL    = "https://api.deepseek.com/responses"
-	defaultResponsesModel  = "deepseek-v4-flash"
-	defaultResponsesAPIKey = ""
+	defaultResponsesURL   = "https://api.deepseek.com/responses"
+	defaultResponsesModel = "deepseek-v4-flash"
 )
 
 // OpenAPIConfig 保存 Responses API 客户端配置。
+type OpenAPIConfig struct {
 	BaseURL string
 	APIKey  string
 	Model   string
 }
 
 // OpenAPIClient 封装 Responses API 的 HTTP 调用。
+type OpenAPIClient struct {
 	HTTPClient *http.Client
 	config     OpenAPIConfig
+	history    []map[string]string
 }
 
 // OpenAPIReasoning 配置模型的推理强度。
+type OpenAPIReasoning struct {
 	Effort string `json:"effort"`
 }
 
 // OpenAPITextFormat 配置文本输出格式和结构化 Schema。
+type OpenAPITextFormat struct {
 	Type   string         `json:"type"`
 	Name   string         `json:"name"`
 	Schema map[string]any `json:"schema"`
 }
 
 // OpenAPIText 配置 Responses API 的文本输出选项。
+type OpenAPIText struct {
 	Format OpenAPITextFormat `json:"format"`
 }
 
@@ -61,6 +68,7 @@ type OpenAPIRequest struct {
 }
 
 // OpenAPIResponse 表示一次非流式 Responses API 响应。
+type OpenAPIResponse struct {
 	ID                string              `json:"id"`
 	Object            string              `json:"object"`
 	CreatedAt         int64               `json:"created_at"`
@@ -75,6 +83,7 @@ type OpenAPIRequest struct {
 }
 
 // OpenAPIOutputItem 表示响应中的一个输出项。
+type OpenAPIOutputItem struct {
 	ID      string                 `json:"id"`
 	Type    string                 `json:"type"`
 	Status  string                 `json:"status"`
@@ -83,6 +92,7 @@ type OpenAPIRequest struct {
 }
 
 // OpenAPIOutputContent 表示输出项中的文本内容块。
+type OpenAPIOutputContent struct {
 	Type        string `json:"type"`
 	Text        string `json:"text"`
 	Annotations []any  `json:"annotations"`
@@ -90,12 +100,14 @@ type OpenAPIRequest struct {
 }
 
 // OpenAPIUsage 记录本次请求的 Token 使用量。
+type OpenAPIUsage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
 	TotalTokens  int `json:"total_tokens"`
 }
 
 // OpenAPIError 表示服务端返回的非 2xx 错误。
+type OpenAPIError struct {
 	StatusCode int
 	Type       string
 	Code       any
@@ -104,17 +116,20 @@ type OpenAPIRequest struct {
 }
 
 // Error 返回便于查看的 API 错误信息。
+func (e *OpenAPIError) Error() string {
 	if e.Message == "" {
 		return fmt.Sprintf("responses API request failed, HTTP status %d", e.StatusCode)
 	}
 	return fmt.Sprintf("responses API request failed, HTTP status %d: %s", e.StatusCode, e.Message)
 }
 
-// NewOpenAPIClient 使用代码中的默认地址、模型和 API Key 创建客户端。
-	return NewOpenAPIClientWithConfig(OpenAPIConfig{APIKey: defaultResponsesAPIKey})
+// NewOpenAPIClient 使用代码中的默认地址、模型和环境变量中的 API Key 创建客户端。
+func NewOpenAPIClient() *OpenAPIClient {
+	return NewOpenAPIClientWithConfig(OpenAPIConfig{APIKey: os.Getenv("DEEPSEEK_API_KEY")})
 }
 
 // NewOpenAPIClientWithConfig 使用指定配置创建客户端，空字段使用默认值。
+func NewOpenAPIClientWithConfig(cfg OpenAPIConfig) *OpenAPIClient {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = defaultResponsesURL
 	}
@@ -141,10 +156,12 @@ func NewOpenAPIRequest(instructions string, input any) OpenAPIRequest {
 }
 
 // Invoke 发起一次非流式请求并返回完整响应。
+func (c *OpenAPIClient) Invoke(instructions string, input any) (*OpenAPIResponse, error) {
 	return c.CreateResponse(context.Background(), NewOpenAPIRequest(instructions, input))
 }
 
 // CreateResponse 使用给定上下文和请求体执行非流式调用。
+func (c *OpenAPIClient) CreateResponse(ctx context.Context, request OpenAPIRequest) (*OpenAPIResponse, error) {
 	if c == nil {
 		return nil, errors.New("OpenAPIClient is nil")
 	}
@@ -192,6 +209,7 @@ func NewOpenAPIRequest(instructions string, input any) OpenAPIRequest {
 }
 
 // OutputText 合并响应中所有输出内容块的文本。
+func (r *OpenAPIResponse) OutputText() string {
 	if r == nil {
 		return ""
 	}
@@ -204,9 +222,13 @@ func NewOpenAPIRequest(instructions string, input any) OpenAPIRequest {
 	return result.String()
 }
 
-// OpenAPIStreamDelta 表示流式响应中的一个事件增量。
-	Type  string
-	Delta string
+// AddHistory 追加一条对话消息。历史超过 20 条时删除最旧的两条。
+func (c *OpenAPIClient) AddHistory(m map[string]string) []map[string]string {
+	if len(c.history) > 20 {
+		c.history = append(c.history[:0], c.history[2:]...)
+	}
+	c.history = append(c.history, m)
+	return c.history
 }
 
 type openAPIStreamEvent struct {
@@ -219,14 +241,38 @@ type openAPIStreamEvent struct {
 	} `json:"response"`
 }
 
-// StreamChan 发起 SSE 流式请求，并通过 channel 返回文本增量。
-func (c *OpenAPIClient) StreamChan(instructions string, input any) (<-chan OpenAPIStreamDelta, <-chan error) {
-	return c.StreamChanContext(context.Background(), instructions, input)
+// Stream 发起 SSE 流式请求，每收到一个增量即回调 onDelta（回调式）。
+func (c *OpenAPIClient) Stream(prompt string, content string, onDelta func(StreamDelta)) error {
+	ch, errCh := c.StreamChan(prompt, content)
+	for d := range ch {
+		onDelta(d)
+	}
+	return <-errCh
+}
+
+// StreamChan 发起 SSE 流式请求，返回 channel 逐条消费增量（通道式）。
+func (c *OpenAPIClient) StreamChan(prompt string, content string) (<-chan StreamDelta, <-chan error) {
+	return c.StreamChanContext(context.Background(), prompt, content)
+}
+
+// StreamIter 发起 SSE 流式请求，返回可 for-range 的迭代器（迭代器式）。
+func (c *OpenAPIClient) StreamIter(prompt string, content string) iter.Seq2[StreamDelta, error] {
+	return func(yield func(StreamDelta, error) bool) {
+		ch, errCh := c.StreamChan(prompt, content)
+		for d := range ch {
+			if !yield(d, nil) {
+				return
+			}
+		}
+		if err := <-errCh; err != nil {
+			yield(StreamDelta{}, err)
+		}
+	}
 }
 
 // StreamChanContext 发起支持取消的 SSE 流式请求。ctx 取消后会关闭请求并返回错误。
-func (c *OpenAPIClient) StreamChanContext(ctx context.Context, instructions string, input any) (<-chan OpenAPIStreamDelta, <-chan error) {
-	deltas := make(chan OpenAPIStreamDelta)
+func (c *OpenAPIClient) StreamChanContext(ctx context.Context, prompt string, content string) (<-chan StreamDelta, <-chan error) {
+	deltas := make(chan StreamDelta)
 	errs := make(chan error, 1)
 	go func() {
 		defer close(deltas)
@@ -239,7 +285,9 @@ func (c *OpenAPIClient) StreamChanContext(ctx context.Context, instructions stri
 			errs <- errors.New("API key is missing: set OpenAPIConfig.APIKey in source code")
 			return
 		}
-		request := NewOpenAPIRequest(instructions, input)
+		// 将当前用户输入计入历史，instructions 作为系统提示词，历史作为输入消息。
+		c.history = append(c.history, map[string]string{"role": "user", "content": content})
+		request := NewOpenAPIRequest(prompt, c.history)
 		request.Model = c.config.Model
 		request.Stream = true
 		body, err := json.Marshal(request)
@@ -297,8 +345,15 @@ func (c *OpenAPIClient) StreamChanContext(ctx context.Context, instructions stri
 			if event.Delta == "" {
 				continue
 			}
+			// 根据事件类型区分思考过程与正文。
+			delta := StreamDelta{}
+			if strings.Contains(event.Type, "reasoning") {
+				delta.ReasoningContent = event.Delta
+			} else {
+				delta.Content = event.Delta
+			}
 			select {
-			case deltas <- OpenAPIStreamDelta{Type: event.Type, Delta: event.Delta}:
+			case deltas <- delta:
 			case <-ctx.Done():
 				errs <- ctx.Err()
 				return

@@ -7,6 +7,7 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -90,9 +91,9 @@ func NewClient() *LLM {
 	return &LLM{
 		HTTPClient: &http.Client{},
 		config: &BaseConfig{
-			baseUrl:   "https://api.deepseek.com/chat/completions",
-			apiKey:    "",
-			modelName: "deepseek-v4-pro",
+			baseUrl:   "https://cow.g201.com/v1/chat/completions",
+			apiKey:    os.Getenv("OPENAI_API_KEY"),
+			modelName: "gpt-5.6-sol",
 		},
 		history: []map[string]string{},
 	}

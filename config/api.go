@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"iter"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
+	"time"
 )
 
 // ---- 配置 ----
@@ -31,13 +34,35 @@ type ApiRequest struct {
 	Stream          bool                `json:"stream"`
 }
 
+// Tool 对应 function calling 请求里的 tools 数组元素
+type Tool struct {
+	Type     string   `json:"type"` // 固定 "function"
+	Function Function `json:"function"`
+}
+
+// Function 描述一个可调用函数及其参数 JSON Schema
+type Function struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
+	Arguments   string         `json:"arguments,omitempty"` // 仅响应里出现：模型给的参数 JSON 字符串
+}
+
+// ToolCall 对应响应里的 tool_calls 元素
+type ToolCall struct {
+	ID       string   `json:"id"`
+	Type     string   `json:"type"`
+	Function Function `json:"function"`
+}
+
 // ---- 非流式响应 ----
 
 // Message 消息内容
 type Message struct {
-	Role             string `json:"role"`
-	Content          string `json:"content"`
-	ReasoningContent string `json:"reasoning_content"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"reasoning_content"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // Choice 候选项
@@ -71,8 +96,25 @@ type streamChunk struct {
 		Delta struct {
 			Content          *string `json:"content"`
 			ReasoningContent *string `json:"reasoning_content"`
+			ToolCalls        []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"delta"`
 	} `json:"choices"`
+}
+
+// streamToolCall 流式过程中按 index 拼接好的工具调用（内部用）
+type streamToolCall struct {
+	ID        string
+	Type      string
+	Name      string
+	Arguments string
 }
 
 // ---- 回话历史 -----
@@ -293,4 +335,330 @@ func (llm *LLM) AddHistory(m map[string]string) []map[string]string {
 	}
 	llm.history = append(llm.history, m)
 	return llm.history
+}
+
+// GetCurrentTime 返回当前时间（时:分:秒）。
+// 注意 Go 的格式化模板不是 Java 的 HH:mm:ss，而是固定参考时间 15:04:05。
+func GetCurrentTime() string {
+	return time.Now().Format("15:04:05")
+}
+
+// GetCurrentDate 返回当前日期（年-月-日）。
+// 注意 Go 的格式化模板不是 Java 的 yyyy-MM-dd，而是固定参考时间 2006-01-02。
+func GetCurrentDate() string {
+	return time.Now().Format("2006-01-02")
+}
+
+// buildToolRequest 构建带 tool 的 HTTP 请求，stream 控制是否流式。
+// messages 用 []map[string]any（而非 []map[string]string），因为 assistant 的 tool_calls 是嵌套结构。
+func (llm *LLM) buildToolRequest(messages []map[string]any, tools []Tool, stream bool) (*http.Request, error) {
+	reqBody := map[string]any{
+		"model":            llm.config.modelName,
+		"messages":         messages,
+		"thinking":         map[string]string{"type": "enabled"},
+		"reasoning_effort": "medium",
+	}
+	if len(tools) > 0 {
+		reqBody["tools"] = tools
+	}
+	if stream {
+		reqBody["stream"] = true
+	}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequest("POST", llm.config.baseUrl, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+llm.config.apiKey)
+	return httpReq, nil
+}
+
+// doToolRequest 发送带 tool 的非流式请求并解析响应。
+func (llm *LLM) doToolRequest(messages []map[string]any, tools []Tool) (*ApiResponse, error) {
+	httpReq, err := llm.buildToolRequest(messages, tools, false)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := llm.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	var apiResp ApiResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil, err
+	}
+	return &apiResp, nil
+}
+
+// InvokeWithTools 非流式调用并自动处理工具调用循环。
+// 声明 tools 后，模型返回 tool_calls 时用 handler 执行对应函数，把结果回传，直到模型给出最终回答。
+// handler 入参为工具名和解析后的参数 JSON 对象。
+func (llm *LLM) InvokeWithTools(prompt string, content string, tools []Tool, handler func(name string, args map[string]any) (string, error)) (*ApiResponse, error) {
+	messages := []map[string]any{
+		{"role": "system", "content": prompt},
+		{"role": "user", "content": content},
+	}
+
+	for {
+		resp, err := llm.doToolRequest(messages, tools)
+		if err != nil {
+			return nil, err
+		}
+		if len(resp.Choices) == 0 {
+			return resp, nil
+		}
+		msg := resp.Choices[0].Message
+		if len(msg.ToolCalls) == 0 {
+			return resp, nil
+		}
+
+		// 追加 assistant 的 tool_calls 消息
+		calls := make([]map[string]any, 0, len(msg.ToolCalls))
+		for _, tc := range msg.ToolCalls {
+			calls = append(calls, map[string]any{
+				"id":   tc.ID,
+				"type": tc.Type,
+				"function": map[string]any{
+					"name":      tc.Function.Name,
+					"arguments": tc.Function.Arguments,
+				},
+			})
+		}
+		messages = append(messages, map[string]any{
+			"role":       "assistant",
+			"content":    nil,
+			"tool_calls": calls,
+		})
+
+		// 逐个执行工具并回传结果
+		for _, tc := range msg.ToolCalls {
+			var args map[string]any
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				return nil, fmt.Errorf("解析工具参数: %w", err)
+			}
+			result, err := handler(tc.Function.Name, args)
+			if err != nil {
+				return nil, err
+			}
+			messages = append(messages, map[string]any{
+				"role":         "tool",
+				"tool_call_id": tc.ID,
+				"content":      result,
+			})
+		}
+	}
+}
+
+// TimeDateTools 返回「获取当前时间/日期」的两个工具声明，供调用方（含 main）复用。
+func TimeDateTools() []Tool {
+	return []Tool{
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "get_current_time",
+				Description: "获取当前时间，返回格式为 时:分:秒（如 15:04:05）的字符串",
+				Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+			},
+		},
+		{
+			Type: "function",
+			Function: Function{
+				Name:        "get_current_date",
+				Description: "获取当前日期，返回格式为 年-月-日（如 2006-01-02）的字符串",
+				Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+			},
+		},
+	}
+}
+
+// TimeDateHandler 根据工具名分发：get_current_time 返回时间，get_current_date 返回日期。
+func TimeDateHandler(name string, _ map[string]any) (string, error) {
+	switch name {
+	case "get_current_time":
+		return GetCurrentTime(), nil
+	case "get_current_date":
+		return GetCurrentDate(), nil
+	}
+	return "", fmt.Errorf("未知工具: %s", name)
+}
+
+// AskCurrentTime 询问模型，模型需要时间/日期时会自动调用对应工具（非流式）。
+// 这是把 GetCurrentTime / GetCurrentDate 作为 function calling 工具的完整示例，调用方只需传入问题。
+func (llm *LLM) AskCurrentTime(content string) (*ApiResponse, error) {
+	return llm.InvokeWithTools(
+		"你是一个助手。当用户询问当前时间时调用 get_current_time，询问日期时调用 get_current_date，拿到结果后回答。",
+		content,
+		TimeDateTools(),
+		TimeDateHandler,
+	)
+}
+
+// doStreamToolRound 执行一次流式 tool 请求：边把正文增量交给 onDelta，边按 index 拼接 tool_calls。
+// 返回按 index 升序排列的工具调用列表。
+func (llm *LLM) doStreamToolRound(messages []map[string]any, tools []Tool, onDelta func(StreamDelta)) ([]streamToolCall, error) {
+	httpReq, err := llm.buildToolRequest(messages, tools, true)
+	if err != nil {
+		return nil, err
+	}
+	response, err := llm.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	byIndex := map[int]*streamToolCall{}
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk streamChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return nil, err
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		delta := chunk.Choices[0].Delta
+
+		var d StreamDelta
+		if delta.Content != nil {
+			d.Content = *delta.Content
+		}
+		if delta.ReasoningContent != nil {
+			d.ReasoningContent = *delta.ReasoningContent
+		}
+		if d.Content != "" || d.ReasoningContent != "" {
+			onDelta(d)
+		}
+
+		for _, tc := range delta.ToolCalls {
+			call := byIndex[tc.Index]
+			if call == nil {
+				call = &streamToolCall{}
+				byIndex[tc.Index] = call
+			}
+			if tc.ID != "" {
+				call.ID = tc.ID
+			}
+			if tc.Type != "" {
+				call.Type = tc.Type
+			}
+			if tc.Function.Name != "" {
+				call.Name = tc.Function.Name
+			}
+			call.Arguments += tc.Function.Arguments
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	indices := make([]int, 0, len(byIndex))
+	for i := range byIndex {
+		indices = append(indices, i)
+	}
+	sort.Ints(indices)
+	calls := make([]streamToolCall, 0, len(indices))
+	for _, i := range indices {
+		calls = append(calls, *byIndex[i])
+	}
+	return calls, nil
+}
+
+// StreamChanWithTools 流式调用并自动处理工具调用循环（通道式）。
+// 最终回答的正文增量会逐条发送到返回的 channel；中间的 tool 调用轮次对调用方透明。
+func (llm *LLM) StreamChanWithTools(prompt string, content string, tools []Tool, handler func(name string, args map[string]any) (string, error)) (<-chan StreamDelta, <-chan error) {
+	deltas := make(chan StreamDelta)
+	errs := make(chan error, 1)
+
+	go func() {
+		defer close(deltas)
+		defer close(errs)
+
+		messages := []map[string]any{
+			{"role": "system", "content": prompt},
+			{"role": "user", "content": content},
+		}
+
+		for {
+			calls, err := llm.doStreamToolRound(messages, tools, func(d StreamDelta) {
+				deltas <- d
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if len(calls) == 0 {
+				return
+			}
+
+			// 追加 assistant 的 tool_calls 消息
+			tcMsgs := make([]map[string]any, 0, len(calls))
+			for _, c := range calls {
+				tcMsgs = append(tcMsgs, map[string]any{
+					"id":   c.ID,
+					"type": c.Type,
+					"function": map[string]any{
+						"name":      c.Name,
+						"arguments": c.Arguments,
+					},
+				})
+			}
+			messages = append(messages, map[string]any{
+				"role":       "assistant",
+				"content":    nil,
+				"tool_calls": tcMsgs,
+			})
+
+			// 逐个执行工具并回传结果
+			for _, c := range calls {
+				var args map[string]any
+				if err := json.Unmarshal([]byte(c.Arguments), &args); err != nil {
+					errs <- fmt.Errorf("解析工具参数: %w", err)
+					return
+				}
+				result, err := handler(c.Name, args)
+				if err != nil {
+					errs <- err
+					return
+				}
+				messages = append(messages, map[string]any{
+					"role":         "tool",
+					"tool_call_id": c.ID,
+					"content":      result,
+				})
+			}
+		}
+	}()
+
+	return deltas, errs
+}
+
+// AskCurrentTimeStream 询问模型，模型需要时间/日期时会自动调用对应工具（流式）。
+// 用法同 StreamChan：for d := range ch { ... }，结束后读 errCh。
+func (llm *LLM) AskCurrentTimeStream(content string) (<-chan StreamDelta, <-chan error) {
+	return llm.StreamChanWithTools(
+		"你是一个助手。当用户询问当前时间时调用 get_current_time，询问日期时调用 get_current_date，拿到结果后回答。",
+		content,
+		TimeDateTools(),
+		TimeDateHandler,
+	)
 }

@@ -145,7 +145,7 @@ data: {"type":"response.output_text.delta","delta":"你好"}
 data: {"type":"response.completed"}
 ```
 
-对应解析结构（`config/openapi.go:234`）：
+对应解析结构（`config/openapi.go`）：
 
 ```go
 type openAPIStreamEvent struct {
@@ -158,6 +158,16 @@ type openAPIStreamEvent struct {
 	} `json:"response"`
 }
 ```
+
+### 短期记忆（会话内对话历史）
+
+`OpenAPIClient` 会自动维护会话内的短期记忆（上限 20 条，超出后丢弃最旧的）：
+
+- 每轮调用自动把用户输入写入历史（`role:"user"`），请求发出时把历史作为 `input` 数组一起发送，让模型记得此前问答；
+- 流式/非流式**成功后**，客户端自动把模型回复正文写入历史（`role:"assistant"`，只记正文、不记推理过程）；请求失败则保留本轮 user 消息、不写 assistant；
+- 历史由互斥锁保护、并发安全，可用 `History()` / `AddHistory()` / `ClearHistory()` 查看或管理；
+- 参与记忆的方法：`Invoke(instructions, content string)`（签名已由 `input any` 改为 `content string`）与流式方法 `Stream` / `StreamChan` / `StreamIter`；
+- `CreateResponse(ctx, request)` 与 `NewOpenAPIRequest` 是**无记忆的底层方法**：请求体完全由调用方构造，不读写历史。
 
 ## 三、当前项目映射 + 网关约束
 

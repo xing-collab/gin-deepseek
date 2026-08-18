@@ -21,6 +21,10 @@ const (
 )
 
 func main() {
+	//if os.Getenv("OPENAI_API_KEY") == "" {
+	//	fmt.Println("请先设置环境变量 OPENAI_API_KEY（例如 export OPENAI_API_KEY=sk-...）")
+	//	return
+	//}
 	c := config.NewClient(config.WithAPIKey("sk-92bc83461a094eacb1c0e1660d23d278"))
 
 	char, err := config.LoadCharacter("config/priestess.json")

@@ -22,7 +22,12 @@ const (
 
 func main() {
 	c := config.NewClient(config.WithAPIKey("sk-92bc83461a094eacb1c0e1660d23d278"))
-	prompt := "你是明日方舟的阿米娅，你具有丰富的医护经验与心理学知识，虽然你只有15岁，但是已经是罗德岛的领导人了。"
+
+	char, err := config.LoadCharacter("config/priestess.json")
+	if err != nil {
+		fmt.Println("加载角色卡失败:", err)
+		return
+	}
 
 	// 时间/日期工具：询问时间给时间、询问日期给日期
 	tools := config.TimeDateTools()
@@ -43,6 +48,8 @@ func main() {
 		if input == "exit" {
 			break
 		}
+		char.Update(input)
+		prompt := char.BuildSystemPrompt()
 		ch, errCh := c.StreamChanWithTools(prompt, input, tools, handler)
 		firstContent := true
 		for d := range ch {
@@ -72,9 +79,13 @@ func main() {
 
 }
 
+// ShowReasoning 控制是否在终端打印模型的思考过程（reasoning_content）。
+// 角色扮演时建议关闭，避免思考内容泄漏到对话；调试时置为 true 观察推理。
+const ShowReasoning = false
+
 // 把方法作为参数传递进去
 func printDelta(d config.StreamDelta) (think string, content string) {
-	if d.ReasoningContent != "" {
+	if ShowReasoning && d.ReasoningContent != "" {
 		fmt.Printf("%s%s%s", Blue, d.ReasoningContent, Reset)
 		think = d.ReasoningContent
 	}

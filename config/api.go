@@ -123,9 +123,10 @@ type streamToolCall struct {
 
 // LLM 大模型客户端
 type LLM struct {
-	HTTPClient *http.Client
-	config     *BaseConfig
-	history    []map[string]any
+	HTTPClient   *http.Client
+	config       *BaseConfig
+	systemPrompt string           // 当前 system prompt，每轮可更新（角色状态切换后即时生效）
+	history      []map[string]any // 仅 user/assistant 对话（不含 system）
 }
 
 // Option 客户端配置项，用于 NewClient 的函数式选项模式
@@ -193,10 +194,20 @@ func (llm *LLM) Stream(prompt string, content string, onDelta func(StreamDelta))
 	}
 	defer response.Body.Close()
 
-	return scanSSE(response.Body, func(delta StreamDelta) bool {
+	var answer strings.Builder
+	if err := scanSSE(response.Body, func(delta StreamDelta) bool {
+		if delta.Content != "" {
+			answer.WriteString(delta.Content)
+		}
 		onDelta(delta)
 		return true
-	})
+	}); err != nil {
+		return err
+	}
+	if answer.Len() > 0 {
+		llm.AddHistory(map[string]any{"role": "assistant", "content": answer.String()})
+	}
+	return nil
 }
 
 // StreamChan 流式调用，返回只读 channel 逐条消费增量（通道式，Go 惯用并发）
@@ -219,11 +230,19 @@ func (llm *LLM) StreamChan(prompt string, content string) (<-chan StreamDelta, <
 		}
 		defer response.Body.Close()
 
+		var answer strings.Builder
 		if err := scanSSE(response.Body, func(delta StreamDelta) bool {
+			if delta.Content != "" {
+				answer.WriteString(delta.Content)
+			}
 			ch <- delta
 			return true
 		}); err != nil {
 			errCh <- err
+			return
+		}
+		if answer.Len() > 0 {
+			llm.AddHistory(map[string]any{"role": "assistant", "content": answer.String()})
 		}
 	}()
 
@@ -244,10 +263,18 @@ func (llm *LLM) StreamIter(prompt string, content string) iter.Seq2[StreamDelta,
 		}
 		defer response.Body.Close()
 
+		var answer strings.Builder
 		if err := scanSSE(response.Body, func(delta StreamDelta) bool {
+			if delta.Content != "" {
+				answer.WriteString(delta.Content)
+			}
 			return yield(delta, nil)
 		}); err != nil {
 			yield(StreamDelta{}, err)
+			return
+		}
+		if answer.Len() > 0 {
+			llm.AddHistory(map[string]any{"role": "assistant", "content": answer.String()})
 		}
 	}
 }
@@ -339,14 +366,10 @@ func scanSSE(body io.Reader, onDelta func(StreamDelta) bool) error {
 
 // send 构造 JSON body 并创建 HTTP 请求，设置 Content-Type 和 Authorization
 func send(llm *LLM, prompt string, content string, stream bool) (*http.Request, error) {
-	if len(llm.history) == 0 {
-		promptInfo := map[string]any{"role": "system", "content": prompt}
-		llm.AddHistory(promptInfo)
-	}
-	contentInfo := map[string]any{"role": "user", "content": content}
+	messages := llm.snapshot(prompt, content)
 	apiReq := ApiRequest{
 		Model:           llm.config.modelName,
-		Messages:        llm.AddHistory(contentInfo),
+		Messages:        messages,
 		Thinking:        map[string]string{"type": "enabled"},
 		ReasoningEffort: "medium",
 		Stream:          stream,
@@ -366,15 +389,33 @@ func send(llm *LLM, prompt string, content string, stream bool) (*http.Request, 
 	return httpReq, err
 }
 
-// addHistory 追加一条对话消息。history[0] 固定为 system 不可删，
-// 对话消息超过 20 条时，一次删除第二、三条（下标 1、2），再追加新消息。
+// AddHistory 追加一条对话消息。历史仅存 user/assistant 对话（system 独立于 history），
+// 超过 maxHistoryMessages 条时丢弃最旧的两条（一轮 user+assistant）。
 func (llm *LLM) AddHistory(m map[string]any) []map[string]any {
-	if len(llm.history) > 20 {
-		// 保留下标 0（system），删除下标 1、2（最旧两条对话）
-		llm.history = append(llm.history[:1], llm.history[3:]...)
-	}
 	llm.history = append(llm.history, m)
+	if len(llm.history) > maxHistoryMessages {
+		llm.history = append([]map[string]any(nil), llm.history[2:]...)
+	}
 	return llm.history
+}
+
+// SetSystemPrompt 更新 system prompt（角色状态变化后调用，下轮请求即时生效）。
+func (llm *LLM) SetSystemPrompt(prompt string) {
+	llm.systemPrompt = prompt
+}
+
+// snapshot 登记本轮 user 消息并返回本次请求的完整 messages：
+// [system(当前 prompt)] + 历史对话 + 本轮 user。
+// 每次调用都会用传入的 prompt 更新 system，保证状态切换后立即生效。
+func (llm *LLM) snapshot(prompt string, content string) []map[string]any {
+	if prompt != "" {
+		llm.systemPrompt = prompt
+	}
+	llm.AddHistory(map[string]any{"role": "user", "content": content})
+	messages := make([]map[string]any, 0, len(llm.history)+1)
+	messages = append(messages, map[string]any{"role": "system", "content": llm.systemPrompt})
+	messages = append(messages, llm.history...)
+	return messages
 }
 
 // GetCurrentTime 返回当前时间（时:分:秒）。
@@ -445,13 +486,7 @@ func (llm *LLM) doToolRequest(messages []map[string]any, tools []Tool) (*ApiResp
 // 声明 tools 后，模型返回 tool_calls 时用 handler 执行对应函数，把结果回传，直到模型给出最终回答。
 // handler 入参为工具名和解析后的参数 JSON 对象。
 func (llm *LLM) InvokeWithTools(prompt string, content string, tools []Tool, handler func(name string, args map[string]any) (string, error)) (*ApiResponse, error) {
-	if len(llm.history) == 0 {
-		llm.AddHistory(map[string]any{"role": "system", "content": prompt})
-	}
-	llm.AddHistory(map[string]any{"role": "user", "content": content})
-
-	messages := make([]map[string]any, len(llm.history))
-	copy(messages, llm.history)
+	messages := llm.snapshot(prompt, content)
 
 	for {
 		resp, err := llm.doToolRequest(messages, tools)
@@ -637,13 +672,7 @@ func (llm *LLM) StreamChanWithTools(prompt string, content string, tools []Tool,
 		defer close(deltas)
 		defer close(errs)
 
-		if len(llm.history) == 0 {
-			llm.AddHistory(map[string]any{"role": "system", "content": prompt})
-		}
-		llm.AddHistory(map[string]any{"role": "user", "content": content})
-
-		messages := make([]map[string]any, len(llm.history))
-		copy(messages, llm.history)
+		messages := llm.snapshot(prompt, content)
 
 		var answer string
 		for {

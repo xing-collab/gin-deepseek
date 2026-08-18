@@ -21,7 +21,7 @@ const (
 )
 
 func main() {
-	c := config.NewClient()
+	c := config.NewClient(config.WithAPIKey("sk-92bc83461a094eacb1c0e1660d23d278"))
 	prompt := "你是明日方舟的阿米娅，你具有丰富的医护经验与心理学知识，虽然你只有15岁，但是已经是罗德岛的领导人了。"
 
 	// 时间/日期工具：询问时间给时间、询问日期给日期
@@ -44,17 +44,14 @@ func main() {
 			break
 		}
 		ch, errCh := c.StreamChanWithTools(prompt, input, tools, handler)
-		answer := ""
 		firstContent := true
 		for d := range ch {
 			if d.Content != "" && firstContent {
 				fmt.Println()
 				firstContent = false
 			}
-			_, an := printDelta(d)
-			answer += an
+			printDelta(d)
 		}
-		c.AddHistory(map[string]string{"role": "assistant", "content": answer})
 		if err := <-errCh; err != nil {
 			fmt.Println("\n请求失败:", err)
 			return

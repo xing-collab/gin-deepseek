@@ -27,11 +27,11 @@ type BaseConfig struct {
 
 // ApiRequest API 请求参数
 type ApiRequest struct {
-	Model           string              `json:"model"`
-	Messages        []map[string]string `json:"messages"`
-	Thinking        map[string]string   `json:"thinking"`
-	ReasoningEffort string              `json:"reasoning_effort"`
-	Stream          bool                `json:"stream"`
+	Model           string            `json:"model"`
+	Messages        []map[string]any  `json:"messages"`
+	Thinking        map[string]string `json:"thinking"`
+	ReasoningEffort string            `json:"reasoning_effort"`
+	Stream          bool              `json:"stream"`
 }
 
 // Tool 对应 function calling 请求里的 tools 数组元素
@@ -125,19 +125,45 @@ type streamToolCall struct {
 type LLM struct {
 	HTTPClient *http.Client
 	config     *BaseConfig
-	history    []map[string]string
+	history    []map[string]any
 }
 
-// NewClient 创建客户端 类似与java构造器
-func NewClient() *LLM {
+// Option 客户端配置项，用于 NewClient 的函数式选项模式
+type Option func(*BaseConfig)
+
+// WithBaseURL 覆盖默认的 baseUrl
+func WithBaseURL(url string) Option {
+	return func(c *BaseConfig) { c.baseUrl = url }
+}
+
+// WithAPIKey 覆盖默认的 apiKey（默认从环境变量 OPENAI_API_KEY 读取）
+func WithAPIKey(key string) Option {
+	return func(c *BaseConfig) { c.apiKey = key }
+}
+
+// WithModel 覆盖默认的 modelName
+func WithModel(name string) Option {
+	return func(c *BaseConfig) { c.modelName = name }
+}
+
+// NewClient 创建客户端（类似 Java 构造器）。
+// 无参调用使用默认配置；也可传入 WithBaseURL / WithAPIKey / WithModel 覆盖单个字段。
+//
+//	c := config.NewClient()
+//	c := config.NewClient(config.WithModel("gpt-4o"), config.WithAPIKey("sk-..."))
+func NewClient(opts ...Option) *LLM {
+	cfg := &BaseConfig{
+		baseUrl:   "https://api.deepseek.com/chat/completions",
+		apiKey:    os.Getenv("OPENAI_API_KEY"),
+		modelName: "deepseek-v4-flash",
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
 	return &LLM{
-		HTTPClient: &http.Client{},
-		config: &BaseConfig{
-			baseUrl:   "https://cow.g201.com/v1/chat/completions",
-			apiKey:    os.Getenv("OPENAI_API_KEY"),
-			modelName: "gpt-5.6-sol",
-		},
-		history: []map[string]string{},
+		HTTPClient: &http.Client{Timeout: 60 * time.Second},
+		config:     cfg,
+		history:    []map[string]any{},
 	}
 }
 
@@ -235,7 +261,7 @@ func (llm *LLM) doRequest(prompt string, content string) (*ApiResponse, error) {
 		return nil, err
 	}
 
-	response, err := llm.HTTPClient.Do(httpReq)
+	response, err := llm.do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +286,21 @@ func (llm *LLM) doStreamReq(prompt string, content string) (*http.Response, erro
 	if err != nil {
 		return nil, err
 	}
-	return llm.HTTPClient.Do(httpReq)
+	return llm.do(httpReq)
+}
+
+// do 发送请求并检查 HTTP 状态码，非 2xx 时返回带响应体的错误
+func (llm *LLM) do(req *http.Request) (*http.Response, error) {
+	resp, err := llm.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return resp, nil
 }
 
 // scanSSE 逐行解析 SSE 响应体，onDelta 返回 false 时提前停止（正常结束返回 nil）
@@ -300,10 +340,10 @@ func scanSSE(body io.Reader, onDelta func(StreamDelta) bool) error {
 // send 构造 JSON body 并创建 HTTP 请求，设置 Content-Type 和 Authorization
 func send(llm *LLM, prompt string, content string, stream bool) (*http.Request, error) {
 	if len(llm.history) == 0 {
-		promptInfo := map[string]string{"role": "system", "content": prompt}
+		promptInfo := map[string]any{"role": "system", "content": prompt}
 		llm.AddHistory(promptInfo)
 	}
-	contentInfo := map[string]string{"role": "user", "content": content}
+	contentInfo := map[string]any{"role": "user", "content": content}
 	apiReq := ApiRequest{
 		Model:           llm.config.modelName,
 		Messages:        llm.AddHistory(contentInfo),
@@ -328,7 +368,7 @@ func send(llm *LLM, prompt string, content string, stream bool) (*http.Request, 
 
 // addHistory 追加一条对话消息。history[0] 固定为 system 不可删，
 // 对话消息超过 20 条时，一次删除第二、三条（下标 1、2），再追加新消息。
-func (llm *LLM) AddHistory(m map[string]string) []map[string]string {
+func (llm *LLM) AddHistory(m map[string]any) []map[string]any {
 	if len(llm.history) > 20 {
 		// 保留下标 0（system），删除下标 1、2（最旧两条对话）
 		llm.history = append(llm.history[:1], llm.history[3:]...)
@@ -384,7 +424,7 @@ func (llm *LLM) doToolRequest(messages []map[string]any, tools []Tool) (*ApiResp
 		return nil, err
 	}
 
-	response, err := llm.HTTPClient.Do(httpReq)
+	response, err := llm.do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -405,10 +445,13 @@ func (llm *LLM) doToolRequest(messages []map[string]any, tools []Tool) (*ApiResp
 // 声明 tools 后，模型返回 tool_calls 时用 handler 执行对应函数，把结果回传，直到模型给出最终回答。
 // handler 入参为工具名和解析后的参数 JSON 对象。
 func (llm *LLM) InvokeWithTools(prompt string, content string, tools []Tool, handler func(name string, args map[string]any) (string, error)) (*ApiResponse, error) {
-	messages := []map[string]any{
-		{"role": "system", "content": prompt},
-		{"role": "user", "content": content},
+	if len(llm.history) == 0 {
+		llm.AddHistory(map[string]any{"role": "system", "content": prompt})
 	}
+	llm.AddHistory(map[string]any{"role": "user", "content": content})
+
+	messages := make([]map[string]any, len(llm.history))
+	copy(messages, llm.history)
 
 	for {
 		resp, err := llm.doToolRequest(messages, tools)
@@ -420,6 +463,7 @@ func (llm *LLM) InvokeWithTools(prompt string, content string, tools []Tool, han
 		}
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
+			llm.AddHistory(map[string]any{"role": "assistant", "content": msg.Content})
 			return resp, nil
 		}
 
@@ -511,7 +555,7 @@ func (llm *LLM) doStreamToolRound(messages []map[string]any, tools []Tool, onDel
 	if err != nil {
 		return nil, err
 	}
-	response, err := llm.HTTPClient.Do(httpReq)
+	response, err := llm.do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -593,13 +637,20 @@ func (llm *LLM) StreamChanWithTools(prompt string, content string, tools []Tool,
 		defer close(deltas)
 		defer close(errs)
 
-		messages := []map[string]any{
-			{"role": "system", "content": prompt},
-			{"role": "user", "content": content},
+		if len(llm.history) == 0 {
+			llm.AddHistory(map[string]any{"role": "system", "content": prompt})
 		}
+		llm.AddHistory(map[string]any{"role": "user", "content": content})
 
+		messages := make([]map[string]any, len(llm.history))
+		copy(messages, llm.history)
+
+		var answer string
 		for {
 			calls, err := llm.doStreamToolRound(messages, tools, func(d StreamDelta) {
+				if d.Content != "" {
+					answer += d.Content
+				}
 				deltas <- d
 			})
 			if err != nil {
@@ -607,6 +658,9 @@ func (llm *LLM) StreamChanWithTools(prompt string, content string, tools []Tool,
 				return
 			}
 			if len(calls) == 0 {
+				if answer != "" {
+					llm.AddHistory(map[string]any{"role": "assistant", "content": answer})
+				}
 				return
 			}
 

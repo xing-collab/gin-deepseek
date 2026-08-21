@@ -218,7 +218,7 @@ LLM 只是"根据输入预测下一个 token"的模型；**Agent 是在 LLM 外�
 
 **是什么**：围绕 Agent 搭"工程脚手架"——评估、测试、追踪、观测。核心目标：**改一行提示词或代码，能立刻知道是变好还是变坏**。
 
-**本项目落点**：`config/openapi_test.go` 用 `httptest.Server` 模拟 API、覆盖历史裁剪/深拷贝/并发/流式错误等，就是 harness 的雏形——**测试不碰真实 API**（AGENTS.md 要求）。
+**本项目落点**：`test/openapi_test.go` 用 `httptest.Server` 模拟 API、覆盖历史裁剪/深拷贝/并发/流式错误等，就是 harness 的雏形——**测试不碰真实 API**（AGENTS.md 要求）。
 
 **深入方向**：LLM 评估集（eval set）、断言式 vs 模型判分式评估、链路追踪（tracing）、成本/延迟观测。
 
@@ -255,7 +255,7 @@ LLM 只是"根据输入预测下一个 token"的模型；**Agent 是在 LLM 外�
 ### Phase 4：Reasoning 与 Memory
 - **目标**：理解思考过程字段与上下文窗口管理。
 - **动作**：观察 `ReasoningContent` 与 `Content` 的分离；改 `AddHistory` 的裁剪阈值，观察对回答与成本的影响；读 `openapi.go` 的并发记忆与对应测试。
-- **落点**：`config/openapi.go`、`config/openapi_test.go`。
+- **落点**：`config/openapi.go`、`test/openapi_test.go`。
 - **验收**：能解释"为什么要裁剪历史""思考过程为什么不回填正文"。
 
 ### Phase 5：组装真正的 Agent Loop + Planning
@@ -292,7 +292,7 @@ LLM 只是"根据输入预测下一个 token"的模型；**Agent 是在 LLM 外�
 | Reasoning | `config/api.go` | `ReasoningContent` / `Thinking` / `ReasoningEffort` |
 | Memory（短期） | `config/api.go` | `history` / `AddHistory` |
 | Memory（并发安全） | `config/openapi.go` | `mu sync.Mutex` / `History` / `ClearHistory` |
-| Harness（测试） | `config/openapi_test.go` | `httptest.Server` 系列测试 |
+| Harness（测试） | `test/openapi_test.go` | `httptest.Server` 系列测试 |
 
 ---
 

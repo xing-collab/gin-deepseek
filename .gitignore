@@ -11,5 +11,5 @@
 # Logs
 log/
 
-# Test binary
-test/
+# Go test binaries
+*.test

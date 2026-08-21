@@ -21,11 +21,9 @@ const (
 )
 
 func main() {
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		fmt.Println("请先设置环境变量 OPENAI_API_KEY（例如 export OPENAI_API_KEY=sk-...）")
-		return
-	}
-	c := config.NewClient()
+	c := config.NewOpenAPIClient(
+		config.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
+	)
 
 	char, err := config.LoadCharacter("config/priestess.json")
 	if err != nil {
@@ -36,15 +34,6 @@ func main() {
 	// 时间/日期工具：询问时间给时间、询问日期给日期
 	tools := config.TimeDateTools()
 	handler := config.TimeDateHandler
-	//// 方式一：回调式 Stream
-	//fmt.Println("=== 回调式 Stream ===")
-	//if err := c.Stream(prompt, "你好", printDelta); err != nil {
-	//	fmt.Println("\n请求失败:", err)
-	//	return
-	//}
-	//fmt.Println()
-	//
-	// 方式二：通道式 StreamChan
 	fmt.Println("=== 通道式 StreamChan ===")
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -70,22 +59,11 @@ func main() {
 		fmt.Println()
 	}
 
-	//// 方式三：迭代器式 StreamIter
-	//fmt.Println("=== 迭代器式 StreamIter ===")
-	//for d, err := range c.StreamIter(prompt, "你好") {
-	//	if err != nil {
-	//		fmt.Println("\n请求失败:", err)
-	//		return
-	//	}
-	//	printDelta(d)
-	//}
-	//fmt.Println()
-
 }
 
 // ShowReasoning 控制是否在终端打印模型的思考过程（reasoning_content）。
 // 角色扮演时建议关闭，避免思考内容泄漏到对话；调试时置为 true 观察推理。
-const ShowReasoning = false
+const ShowReasoning = true
 
 // 把方法作为参数传递进去
 func printDelta(d config.StreamDelta) (think string, content string) {

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is a small Go 1.25 command-line client for an LLM chat API. `main.go` contains the interactive CLI and output formatting. `config/api.go` owns HTTP requests, conversation history, SSE parsing, and the callback, channel, and iterator streaming APIs; keep additional client code in this package. `test/` currently contains learning/example types, not automated tests. Architectural and streaming notes live in `docs/`. Treat `ai-test.exe` and files under `log/` as generated artifacts; do not edit or commit new binaries or runtime logs.
+This repository is a small Go 1.25 command-line client for an LLM chat API. `main.go` contains the interactive CLI and output formatting. `config/api.go` owns HTTP requests, conversation history, SSE parsing, and the callback, channel, and iterator streaming APIs; keep additional client code in this package. Automated tests and learning/example types live in `test/`; keep `config/` free of `*_test.go` files. Architectural and streaming notes live in `docs/`. Treat `ai-test.exe` and files under `log/` as generated artifacts; do not edit or commit new binaries or runtime logs.
 
 ## Build, Test, and Development Commands
 
@@ -18,7 +18,7 @@ Follow idiomatic Go and let `gofmt` control tabs and layout. Package names shoul
 
 ## Testing Guidelines
 
-Use Go's standard `testing` package. Place tests beside implementation files and name them `*_test.go`; name test functions `TestBehavior`. Prefer table-driven tests and `httptest.Server` for request/response behavior. Cover SSE `[DONE]`, malformed JSON, empty or `null` deltas, HTTP failures, early iterator termination, and history trimming. Tests must not call the live API.
+Use Go's standard `testing` package. Place tests under `test/` and name them `*_test.go`; name test functions `TestBehavior`. Prefer table-driven tests and `httptest.Server` for request/response behavior. Cover SSE `[DONE]`, malformed JSON, empty or `null` deltas, HTTP failures, early iterator termination, and history trimming. Tests must not call the live API.
 
 ## Commit & Pull Request Guidelines
 

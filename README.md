@@ -37,7 +37,7 @@ ai-test/
 │   ├── character_test.go    # 角色卡单元测试
 │   ├── openapi_test.go      # OpenAPIClient 测试（httptest.Server）
 │   └── priestess.json       # 普瑞赛斯角色卡数据
-├── test/                    # 学习示例代码（非自动化测试）
+├── test/                    # 自动化测试与学习示例代码
 ├── docs/                    # 架构笔记
 ├── 普瑞赛斯.md              # 角色协议原始伪代码（已落地为 priestess.json）
 ├── go.mod
@@ -139,10 +139,10 @@ for scanner.Scan() {
 
 ```bash
 go test ./...                         # 全部测试
-go test ./config/ -run TestLoadCharacter   # 单个测试
+go test ./test/ -run TestLoadCharacter     # 单个测试
 ```
 
-真正的测试与被测代码同目录、以 `_test.go` 结尾，用 `httptest.Server` 模拟服务端，不真实调用外部 API。`test/` 目录是学习示例（`User`、`Chan` 等类型），**不是**自动化测试。
+自动化测试统一放在 `test/` 目录、以 `_test.go` 结尾，并通过 `httptest.Server` 模拟服务端，不真实调用外部 API。该目录也保留 `User`、`Chan` 等学习示例类型。
 
 ## 安全
 

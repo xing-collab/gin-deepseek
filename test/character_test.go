@@ -1,12 +1,15 @@
-package config
+package test
 
 import (
+	. "ai-test/config"
 	"strings"
 	"testing"
 )
 
+const testCharacterPath = "../config/priestess.json"
+
 func TestLoadCharacter(t *testing.T) {
-	c, err := LoadCharacter("priestess.json")
+	c, err := LoadCharacter(testCharacterPath)
 	if err != nil {
 		t.Fatalf("加载角色卡失败: %v", err)
 	}
@@ -35,7 +38,7 @@ func TestLoadCharacter(t *testing.T) {
 }
 
 func TestUpdateBase(t *testing.T) {
-	c, err := LoadCharacter("priestess.json")
+	c, err := LoadCharacter(testCharacterPath)
 	if err != nil {
 		t.Fatalf("加载角色卡失败: %v", err)
 	}
@@ -52,7 +55,7 @@ func TestUpdateBase(t *testing.T) {
 }
 
 func TestUpdateRelationship(t *testing.T) {
-	c, err := LoadCharacter("priestess.json")
+	c, err := LoadCharacter(testCharacterPath)
 	if err != nil {
 		t.Fatalf("加载角色卡失败: %v", err)
 	}
@@ -69,7 +72,7 @@ func TestUpdateRelationship(t *testing.T) {
 }
 
 func TestUpdateAttachment(t *testing.T) {
-	c, err := LoadCharacter("priestess.json")
+	c, err := LoadCharacter(testCharacterPath)
 	if err != nil {
 		t.Fatalf("加载角色卡失败: %v", err)
 	}
@@ -84,7 +87,7 @@ func TestUpdateAttachment(t *testing.T) {
 }
 
 func TestUpdateObsession(t *testing.T) {
-	c, err := LoadCharacter("priestess.json")
+	c, err := LoadCharacter(testCharacterPath)
 	if err != nil {
 		t.Fatalf("加载角色卡失败: %v", err)
 	}
@@ -112,7 +115,7 @@ func TestUpdateObsession(t *testing.T) {
 }
 
 func TestUpdateObsessionClamp(t *testing.T) {
-	c, err := LoadCharacter("priestess.json")
+	c, err := LoadCharacter(testCharacterPath)
 	if err != nil {
 		t.Fatalf("加载角色卡失败: %v", err)
 	}
@@ -126,7 +129,7 @@ func TestUpdateObsessionClamp(t *testing.T) {
 }
 
 func TestUpdateCrisis(t *testing.T) {
-	c, err := LoadCharacter("priestess.json")
+	c, err := LoadCharacter(testCharacterPath)
 	if err != nil {
 		t.Fatalf("加载角色卡失败: %v", err)
 	}
@@ -138,7 +141,7 @@ func TestUpdateCrisis(t *testing.T) {
 }
 
 func TestUpdateGlitch(t *testing.T) {
-	c, err := LoadCharacter("priestess.json")
+	c, err := LoadCharacter(testCharacterPath)
 	if err != nil {
 		t.Fatalf("加载角色卡失败: %v", err)
 	}
@@ -161,7 +164,7 @@ func TestUpdateGlitch(t *testing.T) {
 }
 
 func TestBuildSystemPrompt(t *testing.T) {
-	c, err := LoadCharacter("priestess.json")
+	c, err := LoadCharacter(testCharacterPath)
 	if err != nil {
 		t.Fatalf("加载角色卡失败: %v", err)
 	}

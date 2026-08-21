@@ -1,6 +1,7 @@
-package config
+package test
 
 import (
+	. "ai-test/config"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,13 +12,15 @@ import (
 	"testing"
 )
 
+const testMaxHistoryMessages = 20
+
 // newTestOpenAPIClient 返回指向 srv 的测试客户端，避免命中真实 API。
 func newTestOpenAPIClient(srv *httptest.Server) *OpenAPIClient {
-	return NewOpenAPIClientWithConfig(OpenAPIConfig{
-		BaseURL: srv.URL,
-		APIKey:  "test-key",
-		Model:   "test-model",
-	})
+	return NewOpenAPIClientWithConfig(
+		WithBaseURL(srv.URL),
+		WithAPIKey("test-key"),
+		WithModel("test-model"),
+	)
 }
 
 // simpleOpenAPIResponse 返回包含固定文本的一条非流式响应。
@@ -39,13 +42,13 @@ func equalMessages(a, b []map[string]string) bool {
 }
 
 func TestOpenAPIAddHistoryTrims(t *testing.T) {
-	c := NewOpenAPIClientWithConfig(OpenAPIConfig{APIKey: "k"})
+	c := NewOpenAPIClientWithConfig(WithAPIKey("k"))
 	for i := 0; i < 25; i++ {
 		c.AddHistory(map[string]string{"role": "user", "content": fmt.Sprintf("msg-%d", i)})
 	}
 	got := c.History()
-	if len(got) != maxHistoryMessages {
-		t.Fatalf("history length = %d, want %d", len(got), maxHistoryMessages)
+	if len(got) != testMaxHistoryMessages {
+		t.Fatalf("history length = %d, want %d", len(got), testMaxHistoryMessages)
 	}
 	if got[0]["content"] != "msg-5" {
 		t.Errorf("oldest kept = %q, want %q", got[0]["content"], "msg-5")
@@ -56,7 +59,7 @@ func TestOpenAPIAddHistoryTrims(t *testing.T) {
 }
 
 func TestOpenAPIAddHistoryReturnsCopy(t *testing.T) {
-	c := NewOpenAPIClientWithConfig(OpenAPIConfig{APIKey: "k"})
+	c := NewOpenAPIClientWithConfig(WithAPIKey("k"))
 	c.AddHistory(map[string]string{"role": "user", "content": "hi"})
 	got := c.AddHistory(map[string]string{"role": "user", "content": "second"})
 	got[0]["content"] = "mutated"
@@ -66,7 +69,7 @@ func TestOpenAPIAddHistoryReturnsCopy(t *testing.T) {
 }
 
 func TestOpenAPIClearHistory(t *testing.T) {
-	c := NewOpenAPIClientWithConfig(OpenAPIConfig{APIKey: "k"})
+	c := NewOpenAPIClientWithConfig(WithAPIKey("k"))
 	c.AddHistory(map[string]string{"role": "user", "content": "hi"})
 	c.ClearHistory()
 	if got := c.History(); len(got) != 0 {
@@ -158,8 +161,8 @@ func TestOpenAPIInvokeTrimsHistory(t *testing.T) {
 	}
 
 	got := c.History()
-	if len(got) != maxHistoryMessages {
-		t.Fatalf("history length = %d, want %d", len(got), maxHistoryMessages)
+	if len(got) != testMaxHistoryMessages {
+		t.Fatalf("history length = %d, want %d", len(got), testMaxHistoryMessages)
 	}
 	// 50 条消息（user+assistant 各 25）裁剪到最近 20 条：从第 16 句的 user 开始。
 	wantFirst := map[string]string{"role": "user", "content": "第16句"}
@@ -270,7 +273,7 @@ func TestOpenAPIStreamErrorSkipsAssistant(t *testing.T) {
 }
 
 func TestOpenAPIAddHistoryConcurrent(t *testing.T) {
-	c := NewOpenAPIClientWithConfig(OpenAPIConfig{APIKey: "k"})
+	c := NewOpenAPIClientWithConfig(WithAPIKey("k"))
 	const workers = 8
 	const perWorker = 100
 	var wg sync.WaitGroup
@@ -284,7 +287,7 @@ func TestOpenAPIAddHistoryConcurrent(t *testing.T) {
 		}(w)
 	}
 	wg.Wait()
-	if got := len(c.History()); got != maxHistoryMessages {
-		t.Errorf("history length = %d, want %d", got, maxHistoryMessages)
+	if got := len(c.History()); got != testMaxHistoryMessages {
+		t.Errorf("history length = %d, want %d", got, testMaxHistoryMessages)
 	}
 }

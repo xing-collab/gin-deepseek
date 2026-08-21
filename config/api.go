@@ -8,20 +8,10 @@ import (
 	"io"
 	"iter"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"time"
 )
-
-// ---- 配置 ----
-
-// BaseConfig 基础配置
-type BaseConfig struct {
-	baseUrl   string
-	apiKey    string
-	modelName string
-}
 
 // ---- 请求 ----
 
@@ -32,27 +22,6 @@ type ApiRequest struct {
 	Thinking        map[string]string `json:"thinking"`
 	ReasoningEffort string            `json:"reasoning_effort"`
 	Stream          bool              `json:"stream"`
-}
-
-// Tool 对应 function calling 请求里的 tools 数组元素
-type Tool struct {
-	Type     string   `json:"type"` // 固定 "function"
-	Function Function `json:"function"`
-}
-
-// Function 描述一个可调用函数及其参数 JSON Schema
-type Function struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters"`
-	Arguments   string         `json:"arguments,omitempty"` // 仅响应里出现：模型给的参数 JSON 字符串
-}
-
-// ToolCall 对应响应里的 tool_calls 元素
-type ToolCall struct {
-	ID       string   `json:"id"`
-	Type     string   `json:"type"`
-	Function Function `json:"function"`
 }
 
 // ---- 非流式响应 ----
@@ -109,16 +78,6 @@ type streamChunk struct {
 	} `json:"choices"`
 }
 
-// streamToolCall 流式过程中按 index 拼接好的工具调用（内部用）
-type streamToolCall struct {
-	ID        string
-	Type      string
-	Name      string
-	Arguments string
-}
-
-// ---- 回话历史 -----
-
 // ---- 客户端 ----
 
 // LLM 大模型客户端
@@ -129,38 +88,18 @@ type LLM struct {
 	history      []map[string]any // 仅 user/assistant 对话（不含 system）
 }
 
-// Option 客户端配置项，用于 NewClient 的函数式选项模式
-type Option func(*BaseConfig)
-
-// WithBaseURL 覆盖默认的 baseUrl
-func WithBaseURL(url string) Option {
-	return func(c *BaseConfig) { c.baseUrl = url }
-}
-
-// WithAPIKey 覆盖默认的 apiKey（默认从环境变量 OPENAI_API_KEY 读取）
-func WithAPIKey(key string) Option {
-	return func(c *BaseConfig) { c.apiKey = key }
-}
-
-// WithModel 覆盖默认的 modelName
-func WithModel(name string) Option {
-	return func(c *BaseConfig) { c.modelName = name }
-}
-
 // NewClient 创建客户端（类似 Java 构造器）。
 // 无参调用使用默认配置；也可传入 WithBaseURL / WithAPIKey / WithModel 覆盖单个字段。
 //
 //	c := config.NewClient()
 //	c := config.NewClient(config.WithModel("gpt-4o"), config.WithAPIKey("sk-..."))
 func NewClient(opts ...Option) *LLM {
-	cfg := &BaseConfig{
-		baseUrl:   "https://api.deepseek.com/chat/completions",
-		apiKey:    os.Getenv("OPENAI_API_KEY"),
-		modelName: "deepseek-v4-flash",
-	}
-	for _, opt := range opts {
-		opt(cfg)
-	}
+	cfg := newBaseConfig(
+		"https://api.deepseek.com/chat/completions",
+		"OPENAI_API_KEY",
+		"deepseek-v4-flash",
+		opts...,
+	)
 	return &LLM{
 		HTTPClient: &http.Client{Timeout: 60 * time.Second},
 		config:     cfg,
@@ -389,47 +328,6 @@ func send(llm *LLM, prompt string, content string, stream bool) (*http.Request, 
 	return httpReq, err
 }
 
-// AddHistory 追加一条对话消息。历史仅存 user/assistant 对话（system 独立于 history），
-// 超过 maxHistoryMessages 条时丢弃最旧的两条（一轮 user+assistant）。
-func (llm *LLM) AddHistory(m map[string]any) []map[string]any {
-	llm.history = append(llm.history, m)
-	if len(llm.history) > maxHistoryMessages {
-		llm.history = append([]map[string]any(nil), llm.history[2:]...)
-	}
-	return llm.history
-}
-
-// SetSystemPrompt 更新 system prompt（角色状态变化后调用，下轮请求即时生效）。
-func (llm *LLM) SetSystemPrompt(prompt string) {
-	llm.systemPrompt = prompt
-}
-
-// snapshot 登记本轮 user 消息并返回本次请求的完整 messages：
-// [system(当前 prompt)] + 历史对话 + 本轮 user。
-// 每次调用都会用传入的 prompt 更新 system，保证状态切换后立即生效。
-func (llm *LLM) snapshot(prompt string, content string) []map[string]any {
-	if prompt != "" {
-		llm.systemPrompt = prompt
-	}
-	llm.AddHistory(map[string]any{"role": "user", "content": content})
-	messages := make([]map[string]any, 0, len(llm.history)+1)
-	messages = append(messages, map[string]any{"role": "system", "content": llm.systemPrompt})
-	messages = append(messages, llm.history...)
-	return messages
-}
-
-// GetCurrentTime 返回当前时间（时:分:秒）。
-// 注意 Go 的格式化模板不是 Java 的 HH:mm:ss，而是固定参考时间 15:04:05。
-func GetCurrentTime() string {
-	return time.Now().Format("15:04:05")
-}
-
-// GetCurrentDate 返回当前日期（年-月-日）。
-// 注意 Go 的格式化模板不是 Java 的 yyyy-MM-dd，而是固定参考时间 2006-01-02。
-func GetCurrentDate() string {
-	return time.Now().Format("2006-01-02")
-}
-
 // buildToolRequest 构建带 tool 的 HTTP 请求，stream 控制是否流式。
 // messages 用 []map[string]any（而非 []map[string]string），因为 assistant 的 tool_calls 是嵌套结构。
 func (llm *LLM) buildToolRequest(messages []map[string]any, tools []Tool, stream bool) (*http.Request, error) {
@@ -537,39 +435,6 @@ func (llm *LLM) InvokeWithTools(prompt string, content string, tools []Tool, han
 			})
 		}
 	}
-}
-
-// TimeDateTools 返回「获取当前时间/日期」的两个工具声明，供调用方（含 main）复用。
-func TimeDateTools() []Tool {
-	return []Tool{
-		{
-			Type: "function",
-			Function: Function{
-				Name:        "get_current_time",
-				Description: "获取当前时间，返回格式为 时:分:秒（如 15:04:05）的字符串",
-				Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
-			},
-		},
-		{
-			Type: "function",
-			Function: Function{
-				Name:        "get_current_date",
-				Description: "获取当前日期，返回格式为 年-月-日（如 2006-01-02）的字符串",
-				Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
-			},
-		},
-	}
-}
-
-// TimeDateHandler 根据工具名分发：get_current_time 返回时间，get_current_date 返回日期。
-func TimeDateHandler(name string, _ map[string]any) (string, error) {
-	switch name {
-	case "get_current_time":
-		return GetCurrentTime(), nil
-	case "get_current_date":
-		return GetCurrentDate(), nil
-	}
-	return "", fmt.Errorf("未知工具: %s", name)
 }
 
 // AskCurrentTime 询问模型，模型需要时间/日期时会自动调用对应工具（非流式）。

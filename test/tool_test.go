@@ -2,7 +2,9 @@ package test
 
 import (
 	. "ai-test/config"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -84,5 +86,77 @@ func TestChatCompletionsInvokeWithSharedTools(t *testing.T) {
 func TestTimeDateHandlerRejectsUnknownTool(t *testing.T) {
 	if _, err := TimeDateHandler("missing", nil); err == nil {
 		t.Fatal("expected an error for an unknown tool")
+	}
+}
+
+func TestToolRegistryRegistersExternalFunction(t *testing.T) {
+	registry := NewToolRegistry()
+	if err := registry.RegisterFunction(
+		"add",
+		"Add two numbers.",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"a": map[string]any{"type": "number"},
+				"b": map[string]any{"type": "number"},
+			},
+			"required": []any{"a", "b"},
+		},
+		func(_ context.Context, args map[string]any) (string, error) {
+			return fmt.Sprintf("%.0f", args["a"].(float64)+args["b"].(float64)), nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	tools := registry.Tools()
+	if len(tools) != 1 || tools[0].Function.Name != "add" {
+		t.Fatalf("tools = %#v", tools)
+	}
+	result, err := registry.Execute(context.Background(), AgentToolCall{
+		Name:      "add",
+		Arguments: map[string]any{"a": 2.0, "b": 3.0},
+	})
+	if err != nil || result != "5" {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+}
+
+func TestToolRegistryRejectsDuplicateAndUnknownTools(t *testing.T) {
+	registry := NewToolRegistry()
+	handler := func(context.Context, map[string]any) (string, error) { return "ok", nil }
+	if err := registry.RegisterFunction("echo", "Echo.", nil, handler); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterFunction("echo", "Echo again.", nil, handler); !errors.Is(err, ErrToolDuplicate) {
+		t.Fatalf("duplicate error = %v", err)
+	}
+	if _, err := registry.Execute(context.Background(), AgentToolCall{Name: "missing"}); err == nil {
+		t.Fatal("expected unknown tool error")
+	}
+}
+
+func TestToolRegistryReturnsDeclarationCopies(t *testing.T) {
+	registry := NewToolRegistry()
+	if err := registry.RegisterFunction(
+		"inspect",
+		"Inspect value.",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"value": map[string]any{"type": "string"},
+			},
+		},
+		func(context.Context, map[string]any) (string, error) { return "ok", nil },
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	first := registry.Tools()
+	first[0].Function.Parameters["properties"].(map[string]any)["value"].(map[string]any)["type"] = "number"
+	second := registry.Tools()
+	got := second[0].Function.Parameters["properties"].(map[string]any)["value"].(map[string]any)["type"]
+	if got != "string" {
+		t.Fatalf("registry declaration was mutated: %v", got)
 	}
 }

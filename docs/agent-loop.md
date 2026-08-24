@@ -32,10 +32,21 @@ type AgentToolExecutor interface {
     Execute(context.Context, AgentToolCall) (string, error)
 }
 
+registry := config.NewToolRegistry()
+err := registry.RegisterFunction(
+    "get_weather",
+    "获取指定城市天气。",
+    weatherParameters,
+    getWeather,
+)
+if err != nil {
+    return err
+}
+
 loop := config.AgentLoop{
     Model:           modelAdapter,
-    Executor:        config.NewJSONToolExecutor(handlers),
-    Tools:           config.TimeDateTools(),
+    Executor:        registry,
+    Tools:           registry.Tools(),
     InitialMessages: previousMessages,
     MaxSteps:        8,
 }
@@ -45,6 +56,8 @@ result, err := loop.Run(ctx, userPrompt)
 `AgentModel` 是协议适配边界。它负责把 `AgentState.Messages` 转成服务需要的 `messages` 或 `input`，调用模型，并把输出解析为 `AgentDecision`。loop 不应知道 `choices[0]`、SSE 事件名称等线协议细节。
 
 `AgentToolExecutor` 是执行边界。它可以调用本地函数、HTTP 服务、数据库、MCP server 或另一个 Agent。成功结果必须是可记录的字符串；失败必须返回 error，不能伪装成模型答案。
+
+`ToolRegistry` 用于从 `config` 包外部注入工具。调用方先定义普通 Go 方法，再通过 `RegisterFunction` 将工具声明和 handler 绑定。注册表同时实现 `AgentToolExecutor` 并提供 `Tools()`，因此声明和实际执行方法不会分散到两套映射中。handler 会收到当前 `context.Context` 和模型解析后的参数副本。
 
 ## 3. transcript 约定
 
@@ -76,7 +89,7 @@ result, err := loop.Run(ctx, userPrompt)
 
 - `MaxSteps <= 0` 使用默认上限 8；生产场景建议按任务设置更小的值。
 - 模型决策和每次工具执行都接收 `context.Context`。取消后 loop 不再开始下一次工具调用。
-- 工具名称必须经过白名单或注册表匹配。`NewJSONToolExecutor` 对未知名称返回错误。
+- 工具名称必须经过白名单或注册表匹配。`ToolRegistry.Execute` 对未知名称返回错误，并拒绝重复注册。
 - 在进入真实系统前，对 `Arguments` 做 JSON Schema、类型、范围和权限校验。
 - 工具结果可能包含隐私或凭据。写入日志、长期记忆或返回给模型前应脱敏。
 - `AgentResult.Messages` 适合调试、审计和短期记忆；不要未经筛选地持久化完整 transcript。

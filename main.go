@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -31,7 +32,7 @@ func main() {
 	defer closeLog()
 
 	client := config.NewClient(
-		config.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
+		config.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
 	)
 	character, err := config.LoadCharacter("config/priestess.json")
 	if err != nil {
@@ -40,7 +41,12 @@ func main() {
 		return
 	}
 
-	tools := config.TimeDateTools()
+	toolRegistry, err := buildToolRegistry()
+	if err != nil {
+		logger.Printf("注册 Agent 工具失败: %v", err)
+		fmt.Println("注册 Agent 工具失败:", err)
+		return
+	}
 	var conversation []config.AgentMessage
 	fmt.Println("=== Agent Loop 对话（输入 exit 退出）===")
 	scanner := bufio.NewScanner(os.Stdin)
@@ -72,7 +78,7 @@ func main() {
 			if err := ctx.Err(); err != nil {
 				return "", err
 			}
-			result, err := config.TimeDateHandler(call.Name, call.Arguments)
+			result, err := toolRegistry.Execute(ctx, call)
 			if err != nil {
 				logger.Printf("[Agent 失败] 工具=%s ID=%s 错误=%v", call.Name, call.ID, err)
 				return "", err
@@ -84,7 +90,7 @@ func main() {
 		loop := config.AgentLoop{
 			Model:           model,
 			Executor:        executor,
-			Tools:           tools,
+			Tools:           toolRegistry.Tools(),
 			InitialMessages: conversation,
 			MaxSteps:        8,
 		}
@@ -104,6 +110,40 @@ func main() {
 		logger.Printf("读取输入失败: %v", err)
 		fmt.Println("读取输入失败:", err)
 	}
+}
+
+// buildToolRegistry 演示如何在 config 包外定义方法，并注册给 Agent 调用。
+func buildToolRegistry() (*config.ToolRegistry, error) {
+	registry := config.NewToolRegistry()
+	if err := registry.RegisterFunction(
+		"get_current_time",
+		"获取当前本地时间，格式为 HH:mm:ss。",
+		config.EmptyObjectSchema(),
+		func(_ context.Context, _ map[string]any) (string, error) {
+			return getCurrentTime(), nil
+		},
+	); err != nil {
+		return nil, err
+	}
+	if err := registry.RegisterFunction(
+		"get_current_date",
+		"获取当前本地日期，格式为 YYYY-MM-DD。",
+		config.EmptyObjectSchema(),
+		func(_ context.Context, _ map[string]any) (string, error) {
+			return getCurrentDate(), nil
+		},
+	); err != nil {
+		return nil, err
+	}
+	return registry, nil
+}
+
+func getCurrentTime() string {
+	return time.Now().Format("15:04:05")
+}
+
+func getCurrentDate() string {
+	return time.Now().Format("2006-01-02")
 }
 
 func newAgentLogger(path string) (*log.Logger, func(), error) {

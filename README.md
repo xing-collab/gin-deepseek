@@ -1,151 +1,277 @@
 # ai-test
 
-一个基于 Go 的 DeepSeek 大模型对话项目，核心目标是把「角色卡 + 状态机 + 短期记忆 + Function calling + 流式输出」这套能力落成一个可运行的交互式 CLI。
+一个使用 Go 构建的 LLM Agent CLI 实验项目。当前框架把角色卡、短期会话记忆、模型工具调用和 Agent loop 组合成一个可运行的命令行助手。
 
-它同时封装了 DeepSeek 的两种 API 协议，并示范了 Go 里几种典型的代码设计模式：函数式选项构造器、三种流式接口（回调 / 通道 / 迭代器）、用 channel 表达并发流、以及「状态由程序决定、不交给模型」的角色扮演架构。
+项目的核心原则是：
 
-## 功能特性
+- 模型只负责理解任务和提出下一步动作；
+- 程序负责工具白名单、工具执行、上下文取消和最大步数；
+- Chat Completions、Responses API 等协议细节留在各自适配器中；
+- Agent loop 只处理协议无关的 transcript 和调度。
 
-- **双协议客户端**：`chat/completions`（`LLM`）与 Responses API（`OpenAPIClient`）两套并行的客户端，协议不同、互不依赖。
-- **三种流式接口**：回调式 `Stream`、通道式 `StreamChan`、迭代器式 `StreamIter`，每种都区分思考内容（`reasoning_content`）与正文（`content`）。
-- **短期记忆**：多轮对话上下文自动复用，超窗自动裁剪，请求与写回分离避免污染。
-- **Function calling**：模型按需调用工具（获取时间 / 日期），程序执行后回传结果。
-- **角色卡运行时**：从 JSON 加载角色设定，关键词触发器切换状态，每轮动态组装 system prompt。
-- **函数式选项构造器**：`NewClient(WithBaseURL(...), WithAPIKey(...), WithModel(...))`。
+## 当前能力
+
+- AgentLoop：有最大步数限制的 ReAct 调度循环。
+- ChatAgentModel：将 Chat Completions 客户端适配为 AgentModel。
+- 工具调用：外部代码可注入任意 Go 方法，模型按声明调用，程序执行后把结果交回模型。
+- 多轮记忆：main.go 保存 AgentResult.Messages，下一轮通过 InitialMessages 续接会话。
+- 角色卡：从 config/priestess.json 加载角色状态、触发器和 system prompt。
+- 思考与调用日志：终端可显示模型思考和 Agent 调用，详细记录写入 log/agent.log。
+- 双协议客户端：同时保留 Chat Completions 客户端和 Responses API 客户端。
+- 流式接口：底层客户端提供回调、channel 和迭代器三种流式 API。
+- 自动化测试：使用标准库 testing 和 httptest.Server，不访问真实 API。
 
 ## 快速开始
 
-```bash
-# 设置 API Key（两种客户端分别读取不同环境变量）
-export OPENAI_API_KEY="sk-..."        # LLM 客户端（chat/completions）
-export DEEPSEEK_API_KEY="sk-..."      # OpenAPIClient（Responses API）
+### 1. 配置 API Key
 
-go run .     # 启动交互式对话，输入内容回车发送，输入 exit 退出
+当前 CLI 使用 Chat Completions 客户端，默认读取 OPENAI_API_KEY。也可以在程序启动时通过 config.WithAPIKey 显式传入。
+
+PowerShell：
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+go run .
 ```
 
-> 项目默认走 DeepSeek 的 `deepseek-v4-flash` 模型。`main.go` 里演示了用 `WithAPIKey` 显式注入 key，实际使用请改用环境变量，避免把 key 提交进仓库。
+Bash：
+
+```bash
+export OPENAI_API_KEY="sk-..."
+go run .
+```
+
+DEEPSEEK_API_KEY 供 Responses API 客户端使用。不要把真实 API Key 写入源码、测试、文档或日志。
+
+### 2. 运行 CLI
+
+```text
+=== Agent Loop 对话（输入 exit 退出）===
+你好
+[思考] ...
+[Agent 调用] get_current_time 参数={}
+[Agent 结果] 12:34:56
+现在是 12:34:56。
+```
+
+输入 exit 退出。每轮交互会更新角色卡状态，并通过 Agent loop 继续使用前面的 transcript。
+
+### 3. 查看日志
+
+运行时日志写入 log/agent.log。日志包含用户输入、模型思考、工具调用、工具结果、最终回答和错误。log/ 已被 .gitignore 排除，不应提交运行日志。
 
 ## 项目结构
 
-```
+```text
 ai-test/
-├── main.go                  # 交互式 CLI 入口：装配角色卡 + 流式对话循环
+├── main.go                  # Agent CLI：角色卡、模型适配器、日志和输入循环
 ├── config/
-│   ├── api.go               # LLM 客户端：chat/completions 协议
-│   ├── openapi.go           # OpenAPIClient：Responses API 协议
-│   ├── character.go         # 角色卡运行时：状态机 + 触发器 + prompt 组装
-│   ├── character_test.go    # 角色卡单元测试
-│   ├── openapi_test.go      # OpenAPIClient 测试（httptest.Server）
-│   └── priestess.json       # 普瑞赛斯角色卡数据
-├── test/                    # 自动化测试与学习示例代码
-├── docs/                    # 架构笔记
-├── 普瑞赛斯.md              # 角色协议原始伪代码（已落地为 priestess.json）
+│   ├── agent.go             # AgentLoop、AgentModel、工具执行器、Chat 适配器
+│   ├── api.go               # Chat Completions 客户端、SSE 和工具请求
+│   ├── openapi.go           # Responses API 客户端
+│   ├── character.go         # 角色卡加载、状态机和 system prompt
+│   ├── memory.go            # 客户端短期历史与裁剪
+│   ├── tool.go              # Tool 声明、时间/日期工具和处理器
+│   └── priestess.json       # 示例角色卡
+├── test/
+│   ├── agent_test.go         # Agent loop 和 Chat 适配器测试
+│   └── *_test.go             # 客户端、工具和角色卡测试
+├── docs/
+│   ├── agent-loop.md         # Agent loop 开发指导
+│   ├── streaming-patterns.md # 流式接口说明
+│   └── api-formats-and-tools.md
 ├── go.mod
-└── CLAUDE.md                # 面向 Claude Code 的开发指引
+└── AGENTS.md                # 仓库开发约定
 ```
 
-## 核心架构与代码逻辑
+## Agent loop 架构
 
-### 1. 两个并行的 LLM 客户端
-
-`config` 包里有两条互不依赖的调用链路，分别对应 DeepSeek 的两种协议：
-
-| 客户端 | 文件 | 协议 | 默认地址 | 记忆类型 |
-| --- | --- | --- | --- | --- |
-| `LLM` | `api.go` | `POST /chat/completions` | `https://api.deepseek.com/chat/completions` | `history []map[string]any` |
-| `OpenAPIClient` | `openapi.go` | `POST /responses` | `https://api.deepseek.com/responses` | `history []map[string]string`（mutex 保护） |
-
-两者都用 `http.Client` 发送请求、手动解析 SSE 流，都实现了「非流式 + 三种流式」四类调用，但数据模型与请求体结构按各自协议独立定义，因此不会互相牵扯。
-
-### 2. 函数式选项构造器
-
-Go 没有函数重载和默认参数，所以 `NewClient` 用函数式选项模式解决「可选参数」问题：
-
-```go
-type Option func(*BaseConfig)
-
-func WithAPIKey(key string) Option   { return func(c *BaseConfig) { c.apiKey = key } }
-func WithBaseURL(url string) Option  { return func(c *BaseConfig) { c.baseUrl = url } }
-func WithModel(name string) Option   { return func(c *BaseConfig) { c.modelName = name } }
-
-func NewClient(opts ...Option) *LLM   // 无参 = 全默认；传参 = 覆盖单个字段
-```
-
-### 3. 三种流式接口，同一套底层
-
-`LLM` 与 `OpenAPIClient` 各自实现三种流式接口，但最终都汇聚到同一套 SSE 解析逻辑：
-
-- **回调式 `Stream`**：每收到一个增量就回调 `onDelta`。
-- **通道式 `StreamChan`**：返回 `<-chan StreamDelta` 和 `<-chan error`，用 goroutine 边读边往 channel 写，Go 惯用的并发消费方式。
-- **迭代器式 `StreamIter`**：返回 Go 1.23+ 的 `iter.Seq2`，可直接 `for d, err := range`。
-
-DeepSeek 流式返回里，`reasoning_content`（思考）和 `content`（正文）是分开的字段，`StreamDelta` 用两个字段分别承载，调用方（`main.go` 的 `printDelta`）可以决定是否展示思考过程。
-
-### 4. 短期记忆
-
-两个客户端的记忆机制都遵循「**请求时快照、成功后才写回**」的原则，避免中间态污染跨轮上下文：
-
-- `LLM`：`history []map[string]any` 跨 `InvokeWithTools` / `StreamChanWithTools` 复用。每次请求前 `copy` 一份工作消息，工具调用循环结束后，才把最终的 assistant 回复写回 history。超过 20 条时保留下标 0 的 system 消息、删除最旧的对话。
-- `OpenAPIClient`：`history []map[string]string` 用 `sync.Mutex` 保护（并发安全），裁剪到最近 20 条，并对外暴露 `History()` / `AddHistory()` / `ClearHistory()`。
-
-### 5. Function calling
-
-以时间/日期工具为例（`TimeDateTools()` + `TimeDateHandler`）：
-
-1. 请求体带上 `tools` 声明（`get_current_time` / `get_current_date`）。
-2. 模型返回 `tool_calls` 时，程序解析参数、调用 handler 执行函数、把 `role:"tool"` 的结果回传。
-3. 循环直到模型给出最终回答，期间的工具调用轮次对调用方透明。
-
-`InvokeWithTools` 是非流式版本，`StreamChanWithTools` 是流式版本（`main.go` 用的就是它，所以角色对话里问「现在几点」模型也能拿到真实时间）。
-
-### 6. 角色卡运行时（状态机）
-
-这是整个项目「角色扮演」的核心，落地了 `普瑞赛斯.md` 里的协议伪代码，关键主张是：**状态由程序决定，不交给模型**。
-
-```
+```text
 用户输入
-   ↓
-Character.Update(input)      // 关键词触发器匹配 → 切换/回落状态
-   ↓
-Character.BuildSystemPrompt() // 按当前状态组装 system prompt
-   ↓
-LLM 流式生成                // 模型只负责「在这个状态下角色该怎么说」
+   │
+   ▼
+角色状态更新 ──> system prompt
+   │
+   ▼
+AgentLoop.Run
+   │
+   ▼
+AgentModel.Decide ── ChatAgentModel ── Chat Completions
+   │
+   ├── Final：追加 assistant 答案并结束
+   │
+   └── Calls：追加 assistant tool_calls
+                    │
+                    ▼
+             AgentToolExecutor
+                    │
+                    ▼
+             追加 tool 结果
+                    │
+                    └──── 回到 Decide
 ```
 
-- `config/priestess.json` 定义角色数据：身份、人格、语言风格、禁词、经典台词、五种状态（`normal` / `architect` / `obsessive` / `crisis` / `glitch`）、四组触发器。
-- `config/character.go` 定义 `CharacterCard` / `Trigger` / `Character` 类型，以及 `LoadCharacter`（读 JSON）、`Update`（关键词匹配、未命中回落 `normal`）、`BuildSystemPrompt`（身份 + 人格 + 语言风格 + 当前状态 + 禁词约束 + 台词风格参考）。
-- 状态跨轮保持（存在 `Character.mode` 里），所以角色会「记住」自己当前处于哪种情绪状态。
-
-### 7. 入口 `main.go`
-
-`main.go` 把上面各模块串成一个交互式循环：
+核心接口位于 [config/agent.go](config/agent.go)：
 
 ```go
-c   := config.NewClient(config.WithAPIKey(...))          // 创建客户端
-char, _ := config.LoadCharacter("config/priestess.json") // 加载角色卡
-tools := config.TimeDateTools()                          // 时间/日期工具
+type AgentModel interface {
+    Decide(context.Context, AgentState, []Tool) (AgentDecision, error)
+}
 
-for scanner.Scan() {
-    input  := scanner.Text()
-    char.Update(input)                                   // 1. 状态机更新
-    prompt := char.BuildSystemPrompt()                   // 2. 组装 prompt
-    ch, errCh := c.StreamChanWithTools(prompt, input, tools, handler)
-    for d := range ch { printDelta(d) }                  // 3. 流式消费
-    if err := <-errCh; err != nil { ... }
+type AgentToolExecutor interface {
+    Execute(context.Context, AgentToolCall) (string, error)
+}
+
+loop := config.AgentLoop{
+    Model:           modelAdapter,
+    Executor:        executor,
+    Tools:           config.TimeDateTools(),
+    InitialMessages: previousMessages,
+    MaxSteps:        8,
+}
+result, err := loop.Run(ctx, userPrompt)
+```
+
+### 决策规则
+
+每一轮模型决策必须满足以下两种情况之一：
+
+1. Final 非空、Calls 为空：返回最终答案。
+2. Final 为空、Calls 至少一个：按顺序执行工具。
+
+以下情况会返回显式错误：
+
+- 模型没有返回答案也没有工具调用：ErrAgentNoAction；
+- 模型同时返回答案和工具调用：ErrAgentInvalidDecision；
+- 超过最大步数：ErrAgentMaxSteps；
+- 模型或工具执行器为空：ErrAgentModelNil / ErrAgentExecutorNil。
+
+### transcript 结构
+
+AgentMessage 是协议无关的消息：
+
+| Role | 用途 |
+| --- | --- |
+| user | 用户任务 |
+| assistant + Content | 模型最终答案 |
+| assistant + ToolCalls | 同一轮的全部工具调用 |
+| tool + ToolCallID | 对应调用 ID 的工具结果 |
+
+同一轮的多个工具调用必须保存在一条 assistant 消息中。工具结果通过 ToolCallID 与调用关联，适配器才能正确转换为 Chat Completions 的 tool_calls 或 Responses 的 function call output。
+
+AgentLoop 会复制传给模型的 state 和 tools，避免模型适配器修改内部 transcript。InitialMessages 用于续接会话，调用方应保存上一轮的 AgentResult.Messages。
+
+## Chat Completions 适配器
+
+ChatAgentModel 负责：
+
+1. 将 AgentMessage 转成 messages；
+2. 将 ToolCalls 转成 Chat Completions 的 tool_calls；
+3. 发起带 tools 的非流式请求；
+4. 解析最终文本、reasoning_content 和工具参数；
+5. 通过 OnReasoning、OnToolCall 回调输出观察信息。
+
+模型适配器不负责执行工具。工具执行必须交给 AgentToolExecutor，这样本地函数、HTTP 服务、数据库、MCP server 或子 Agent 都可以替换接入。
+
+## 工具调用
+
+外部代码通过 config.ToolRegistry 同时注册工具声明和 Go 方法。注册表既提供模型需要的工具列表，也实现 AgentToolExecutor：
+
+```go
+registry := config.NewToolRegistry()
+err := registry.RegisterFunction(
+    "get_weather",
+    "获取指定城市天气。",
+    map[string]any{
+        "type": "object",
+        "properties": map[string]any{
+            "city": map[string]any{"type": "string"},
+        },
+        "required": []any{"city"},
+    },
+    func(ctx context.Context, args map[string]any) (string, error) {
+        return queryWeather(ctx, args["city"].(string))
+    },
+)
+
+loop := config.AgentLoop{
+    Model:    model,
+    Executor: registry,
+    Tools:    registry.Tools(),
 }
 ```
 
-## 测试
+工具调用流程：
 
-```bash
-go test ./...                         # 全部测试
-go test ./test/ -run TestLoadCharacter     # 单个测试
+1. 工具声明随模型请求发送；
+2. 模型返回工具名称、调用 ID 和 JSON 参数；
+3. 适配器解析参数为 map[string]any；
+4. executor 执行真实函数；
+5. loop 将结果追加为 role=tool；
+6. 模型读取结果并生成答案或继续调用工具。
+
+工具名称必须唯一；未知工具、重复注册和空处理函数会返回错误。生产环境接入工具前，应增加 JSON Schema、参数范围、权限、超时、重试和敏感信息脱敏。
+
+## 两套客户端
+
+项目保留两条协议独立的客户端实现：
+
+| 客户端 | 文件 | 协议 | 默认环境变量 |
+| --- | --- | --- | --- |
+| LLM | config/api.go | Chat Completions | OPENAI_API_KEY |
+| OpenAPIClient | config/openapi.go | Responses API | DEEPSEEK_API_KEY |
+
+两套客户端的请求结构、工具格式、SSE 事件和响应类型不同，不要在业务层混用 wire JSON。需要接入 Agent loop 时，应实现一个 AgentModel 适配器，把协议差异封装在适配器内部。
+
+底层 LLM 和 OpenAPIClient 都提供非流式、回调式、channel 式和 Go 迭代器式流式调用。详细说明见 [docs/streaming-patterns.md](docs/streaming-patterns.md) 和 [docs/api-formats-and-tools.md](docs/api-formats-and-tools.md)。
+
+## 角色卡运行时
+
+角色卡由程序控制，不由模型自行修改：
+
+```text
+用户输入
+   ↓
+Character.Update(input)
+   ↓
+匹配关键词并更新状态
+   ↓
+Character.BuildSystemPrompt()
+   ↓
+AgentModel.Decide()
 ```
 
-自动化测试统一放在 `test/` 目录、以 `_test.go` 结尾，并通过 `httptest.Server` 模拟服务端，不真实调用外部 API。该目录也保留 `User`、`Chan` 等学习示例类型。
+config/priestess.json 定义角色身份、人格、表达风格、触发器和状态。每轮输入先执行 Character.Update，再根据当前状态生成 system prompt。
 
-## 安全
+## 开发与验证
 
-- 绝不提交 API key、token 或含私密数据的 prompt / 模型回复。
-- 凭据与端点优先用环境变量（`OPENAI_API_KEY` / `DEEPSEEK_API_KEY`）。
-- 若 key 曾被硬编码进源码，请立即吊销并重新生成。
+```bash
+gofmt -w .
+gofmt -l .
+go build ./...
+go test ./...
+go test ./test -run TestAgent
+go vet ./...
+```
+
+测试不调用真实 API，使用 httptest.Server 模拟请求和 SSE 响应。新增行为时，优先在 test/ 增加测试，不要在 config/ 内新增 *_test.go。
+
+## 安全约定
+
+- 不提交 API Key、token、私密 prompt、模型响应或运行日志。
+- 使用环境变量管理凭据和端点。
+- 工具名称必须经过白名单或注册表匹配。
+- 工具执行结果写入日志或长期记忆前先脱敏。
+- 思考内容可能包含敏感信息；生产环境应谨慎开启终端展示。
+- log/ 和二进制文件属于生成物，不应手动提交。
+
+## 后续路线
+
+- 流式 AgentEvent，统一输出思考、正文、工具开始/结束和最终答案；
+- 每工具独立超时、重试、幂等键和审批策略；
+- MCP 工具发现与调用适配器；
+- transcript 压缩和长期记忆写回；
+- 子 Agent executor；
+- Chat/Responses 两种协议的统一 AgentModel 适配层。
+
+扩展时应保持 MaxSteps、context 取消、工具白名单和 transcript 映射规则不变。

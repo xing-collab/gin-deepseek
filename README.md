@@ -78,6 +78,7 @@ ai-test/
 │   └── *_test.go             # 客户端、工具和角色卡测试
 ├── docs/
 │   ├── agent-loop.md         # Agent loop 开发指导
+│   ├── tool-use.md           # 外部工具定义与注入使用手册
 │   ├── streaming-patterns.md # 流式接口说明
 │   └── api-formats-and-tools.md
 ├── go.mod
@@ -176,6 +177,8 @@ ChatAgentModel 负责：
 ## 工具调用
 
 外部代码通过 config.ToolRegistry 同时注册工具声明和 Go 方法。注册表既提供模型需要的工具列表，也实现 AgentToolExecutor：
+
+完整的定义、参数校验、上下文取消和测试示例见 [docs/tool-use.md](docs/tool-use.md)。
 
 ```go
 registry := config.NewToolRegistry()

@@ -35,6 +35,42 @@ type RegisteredToolHandler func(
 - 返回的字符串会作为工具结果交回模型。结构化结果应先用 `json.Marshal` 编码成 JSON 字符串。
 - 业务失败必须返回 `error`，不要把错误文本伪装成成功结果。
 
+这个签名是 Agent 与工具之间的统一边界，不意味着所有业务方法都必须使用 `map[string]any`。如果希望使用类型安全的参数结构体，可以用 `config.AdaptTypedHandler` 自动完成 `map[string]any` 与结构体之间的 JSON 转换：
+
+```go
+type BirthdayArgs struct {
+    Name string `json:"name"`
+}
+
+func getBirthday(ctx context.Context, args BirthdayArgs) (string, error) {
+    if strings.TrimSpace(args.Name) == "" {
+        return "", fmt.Errorf("name 必须是非空字符串")
+    }
+    return getSheng(args.Name), nil
+}
+
+registry.RegisterFunction(
+    "get_birthday",
+    "传递名称，获取用户生日。",
+    birthdayParameters,
+    config.AdaptTypedHandler(getBirthday),
+)
+```
+
+也可以直接使用 `config.RegisterTypedFunction`，省略显式适配：
+
+```go
+err := config.RegisterTypedFunction(
+    registry,
+    "get_birthday",
+    "传递名称，获取用户生日。",
+    birthdayParameters,
+    getBirthday,
+)
+```
+
+不需要上下文时，可使用 `AdaptTypedHandlerWithoutContext` 或 `RegisterTypedFunctionWithoutContext`。框架仍会在边界处接收 `map[string]any`，但业务层可以只处理自己的参数类型。
+
 示例工具方法：
 
 ```go
@@ -207,4 +243,3 @@ func TestRegistryExecutesExternalTool(t *testing.T) {
 - 为网络和数据库工具设置超时，并使用支持取消的 API。
 - 日志记录工具名、调用 ID、耗时和错误即可；参数和结果按敏感级别脱敏。
 - 将 `MaxSteps` 设置为符合业务的较小值，避免异常循环消耗资源。
-

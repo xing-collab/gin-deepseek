@@ -160,3 +160,50 @@ func TestToolRegistryReturnsDeclarationCopies(t *testing.T) {
 		t.Fatalf("registry declaration was mutated: %v", got)
 	}
 }
+
+func TestAdaptTypedHandler(t *testing.T) {
+	type input struct {
+		Name string `json:"name"`
+	}
+
+	handler := AdaptTypedHandler(func(_ context.Context, args input) (string, error) {
+		return "你好，" + args.Name, nil
+	})
+	result, err := handler(context.Background(), map[string]any{"name": "小明"})
+	if err != nil || result != "你好，小明" {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+}
+
+func TestRegisterTypedFunction(t *testing.T) {
+	type input struct {
+		Count int `json:"count"`
+	}
+
+	registry := NewToolRegistry()
+	err := RegisterTypedFunction(
+		registry,
+		"repeat",
+		"返回重复次数。",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"count": map[string]any{"type": "integer"},
+			},
+		},
+		func(_ context.Context, args input) (string, error) {
+			return fmt.Sprintf("%d", args.Count), nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := registry.Execute(context.Background(), AgentToolCall{
+		Name:      "repeat",
+		Arguments: map[string]any{"count": 3.0},
+	})
+	if err != nil || result != "3" {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+}

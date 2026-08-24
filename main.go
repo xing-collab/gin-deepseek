@@ -135,7 +135,8 @@ func buildToolRegistry() (*config.ToolRegistry, error) {
 	); err != nil {
 		return nil, err
 	}
-	if err := registry.RegisterFunction(
+	if err := config.RegisterTypedFunction(
+		registry,
 		"get_birthday",
 		"传递名称，获取用户生日。",
 		map[string]any{
@@ -149,7 +150,7 @@ func buildToolRegistry() (*config.ToolRegistry, error) {
 			"required":             []any{"name"},
 			"additionalProperties": false,
 		},
-		getBirthday,
+		getBirthdayByArgs,
 	); err != nil {
 		return nil, err
 	}
@@ -190,11 +191,13 @@ func getSheng(name string) string {
 	return name
 }
 
-// getBirthday 将 Agent 参数适配为业务层的 getSheng 方法。
-func getBirthday(_ context.Context, args map[string]any) (string, error) {
-	name, ok := args["name"].(string)
-	if !ok || strings.TrimSpace(name) == "" {
+type birthdayArgs struct {
+	Name string `json:"name"`
+}
+
+func getBirthdayByArgs(_ context.Context, args birthdayArgs) (string, error) {
+	if strings.TrimSpace(args.Name) == "" {
 		return "", fmt.Errorf("参数 name 必须是非空字符串")
 	}
-	return getSheng(name), nil
+	return getSheng(args.Name), nil
 }

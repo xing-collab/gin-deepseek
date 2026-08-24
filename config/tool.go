@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -117,6 +118,58 @@ func (r *ToolRegistry) RegisterFunction(
 			Parameters:  parameters,
 		},
 	}, handler)
+}
+
+// AdaptTypedHandler 将接收具体参数类型的业务方法适配为 Agent 工具处理器。
+// 参数会先从 map[string]any 编码为 JSON，再解码到 T；业务方法不需要处理 map。
+func AdaptTypedHandler[T any](handler func(context.Context, T) (string, error)) RegisteredToolHandler {
+	if handler == nil {
+		return nil
+	}
+	return func(ctx context.Context, args map[string]any) (string, error) {
+		payload, err := json.Marshal(args)
+		if err != nil {
+			return "", fmt.Errorf("编码工具参数: %w", err)
+		}
+		var input T
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return "", fmt.Errorf("解析工具参数: %w", err)
+		}
+		return handler(ctx, input)
+	}
+}
+
+// AdaptTypedHandlerWithoutContext 适配不需要 context 的具体参数方法。
+func AdaptTypedHandlerWithoutContext[T any](handler func(T) (string, error)) RegisteredToolHandler {
+	if handler == nil {
+		return nil
+	}
+	return AdaptTypedHandler(func(_ context.Context, input T) (string, error) {
+		return handler(input)
+	})
+}
+
+// RegisterTypedFunction 注册接收具体参数类型的业务方法。
+// 例如 handler 可以定义为 func(context.Context, WeatherArgs) (string, error)。
+func RegisterTypedFunction[T any](
+	r *ToolRegistry,
+	name string,
+	description string,
+	parameters map[string]any,
+	handler func(context.Context, T) (string, error),
+) error {
+	return r.RegisterFunction(name, description, parameters, AdaptTypedHandler(handler))
+}
+
+// RegisterTypedFunctionWithoutContext 注册不需要 context 的具体参数方法。
+func RegisterTypedFunctionWithoutContext[T any](
+	r *ToolRegistry,
+	name string,
+	description string,
+	parameters map[string]any,
+	handler func(T) (string, error),
+) error {
+	return r.RegisterFunction(name, description, parameters, AdaptTypedHandlerWithoutContext(handler))
 }
 
 // Tools 返回按注册顺序排列的工具声明副本。

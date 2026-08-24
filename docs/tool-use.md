@@ -323,7 +323,107 @@ go test ./...
 go vet ./...
 ```
 
-## 10. 安全清单
+## 10. 完整样例：注册生日查询工具
+
+下面的样例可以直接放入 `main` 包。它演示了如何保留一个普通业务方法，并用类型安全的 handler 将它注册给 Agent。
+
+```go
+package main
+
+import (
+    "ai-test/config"
+    "context"
+    "fmt"
+    "strings"
+)
+
+// BirthdayArgs 是模型调用 get_birthday 时需要提供的参数。
+type BirthdayArgs struct {
+    Name string `json:"name"`
+}
+
+// getSheng 是已有的普通业务方法，不依赖 Agent 框架。
+func getSheng(name string) string {
+    return name + "的生日是 2003-08-10"
+}
+
+// getBirthday 是类型安全的 Agent 工具方法。
+func getBirthday(ctx context.Context, args BirthdayArgs) (string, error) {
+    if err := ctx.Err(); err != nil {
+        return "", err
+    }
+
+    args.Name = strings.TrimSpace(args.Name)
+    if args.Name == "" {
+        return "", fmt.Errorf("参数 name 必须是非空字符串")
+    }
+    return getSheng(args.Name), nil
+}
+
+func registerBirthdayTool(registry *config.ToolRegistry) error {
+    parameters := map[string]any{
+        "type": "object",
+        "properties": map[string]any{
+            "name": map[string]any{
+                "type":        "string",
+                "description": "要查询生日的用户姓名。",
+            },
+        },
+        "required":             []any{"name"},
+        "additionalProperties": false,
+    }
+
+    return config.RegisterTypedFunction(
+        registry,
+        "get_birthday",
+        "根据姓名查询用户生日。",
+        parameters,
+        getBirthday,
+    )
+}
+
+func buildToolRegistry() (*config.ToolRegistry, error) {
+    registry := config.NewToolRegistry()
+    if err := registerBirthdayTool(registry); err != nil {
+        return nil, fmt.Errorf("注册生日工具: %w", err)
+    }
+    return registry, nil
+}
+```
+
+在启动 Agent 时注入注册表：
+
+```go
+registry, err := buildToolRegistry()
+if err != nil {
+    return err
+}
+
+loop := config.AgentLoop{
+    Model:    modelAdapter,
+    Tools:    registry.Tools(),
+    Executor: registry,
+    MaxSteps: 8,
+}
+
+result, err := loop.Run(context.Background(), "小明的生日是什么？")
+if err != nil {
+    return err
+}
+fmt.Println(result.Answer)
+```
+
+模型会看到名为 `get_birthday` 的工具，并生成类似参数：
+
+```json
+{
+  "name": "小明"
+}
+```
+
+注册表将参数转换成 `BirthdayArgs`，调用 `getBirthday`，再把 `getSheng` 返回的结果交给模型生成最终回答。
+
+## 11. 安全清单
 
 - 不在工具描述、参数默认值、日志或返回结果中写入 API Key 和其他秘密；
 - 对字符串长度、数值范围、枚举值和资源 ID 做业务层校验；

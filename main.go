@@ -2,86 +2,126 @@ package main
 
 import (
 	"ai-test/config"
-	"ai-test/test"
 	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 const (
 	Reset  = "\033[0m"
-	Red    = "\033[31m"
+	Blue   = "\033[34m"
 	Green  = "\033[32m"
 	Yellow = "\033[33m"
-	Blue   = "\033[34m"
-	Purple = "\033[35m"
-	Cyan   = "\033[36m"
-	Gray   = "\033[37m"
-	White  = "\033[97m"
 )
 
+// ShowReasoning 控制是否在终端打印模型思考；思考始终会写入日志。
+const ShowReasoning = true
+
 func main() {
-	c := config.NewOpenAPIClient(
+	logger, closeLog, err := newAgentLogger("log/agent.log")
+	if err != nil {
+		fmt.Println("创建 Agent 日志失败:", err)
+		return
+	}
+	defer closeLog()
+
+	client := config.NewClient(
 		config.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 	)
-
-	char, err := config.LoadCharacter("config/priestess.json")
+	character, err := config.LoadCharacter("config/priestess.json")
 	if err != nil {
+		logger.Printf("加载角色卡失败: %v", err)
 		fmt.Println("加载角色卡失败:", err)
 		return
 	}
 
-	// 时间/日期工具：询问时间给时间、询问日期给日期
 	tools := config.TimeDateTools()
-	handler := config.TimeDateHandler
-	fmt.Println("=== 通道式 StreamChan ===")
+	var conversation []config.AgentMessage
+	fmt.Println("=== Agent Loop 对话（输入 exit 退出）===")
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
-		input := scanner.Text()
+		input := strings.TrimSpace(scanner.Text())
 		if input == "exit" {
 			break
 		}
-		char.Update(input)
-		prompt := char.BuildSystemPrompt()
-		ch, errCh := c.StreamChanWithTools(prompt, input, tools, handler)
-		firstContent := true
-		for d := range ch {
-			if d.Content != "" && firstContent {
-				fmt.Println()
-				firstContent = false
+		if input == "" {
+			continue
+		}
+
+		character.Update(input)
+		model := config.ChatAgentModel{
+			Client:       client,
+			SystemPrompt: character.BuildSystemPrompt(),
+			OnReasoning: func(reasoning string) {
+				logger.Printf("[思考] %s", reasoning)
+				if ShowReasoning {
+					fmt.Printf("%s[思考] %s%s\n", Blue, reasoning, Reset)
+				}
+			},
+			OnToolCall: func(call config.AgentToolCall) {
+				logger.Printf("[Agent 调用] 工具=%s ID=%s 参数=%s", call.Name, call.ID, formatJSON(call.Arguments))
+				fmt.Printf("%s[Agent 调用] %s 参数=%s%s\n", Yellow, call.Name, formatJSON(call.Arguments), Reset)
+			},
+		}
+		executor := config.AgentToolFunc(func(ctx context.Context, call config.AgentToolCall) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
 			}
-			printDelta(d)
+			result, err := config.TimeDateHandler(call.Name, call.Arguments)
+			if err != nil {
+				logger.Printf("[Agent 失败] 工具=%s ID=%s 错误=%v", call.Name, call.ID, err)
+				return "", err
+			}
+			logger.Printf("[Agent 结果] 工具=%s ID=%s 结果=%s", call.Name, call.ID, result)
+			fmt.Printf("%s[Agent 结果] %s%s\n", Green, result, Reset)
+			return result, nil
+		})
+		loop := config.AgentLoop{
+			Model:           model,
+			Executor:        executor,
+			Tools:           tools,
+			InitialMessages: conversation,
+			MaxSteps:        8,
 		}
-		if err := <-errCh; err != nil {
-			fmt.Println("\n请求失败:", err)
-			return
+
+		logger.Printf("[用户] %s", input)
+		result, err := loop.Run(context.Background(), input)
+		if err != nil {
+			logger.Printf("[Agent 错误] %v", err)
+			fmt.Println("请求失败:", err)
+			continue
 		}
-		fmt.Println()
+		conversation = result.Messages
+		logger.Printf("[回答] %s", result.Answer)
+		fmt.Println(result.Answer)
 	}
-
+	if err := scanner.Err(); err != nil {
+		logger.Printf("读取输入失败: %v", err)
+		fmt.Println("读取输入失败:", err)
+	}
 }
 
-// ShowReasoning 控制是否在终端打印模型的思考过程（reasoning_content）。
-// 角色扮演时建议关闭，避免思考内容泄漏到对话；调试时置为 true 观察推理。
-const ShowReasoning = true
-
-// 把方法作为参数传递进去
-func printDelta(d config.StreamDelta) (think string, content string) {
-	if ShowReasoning && d.ReasoningContent != "" {
-		fmt.Printf("%s%s%s", Blue, d.ReasoningContent, Reset)
-		think = d.ReasoningContent
+func newAgentLogger(path string) (*log.Logger, func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, nil, err
 	}
-	if d.Content != "" {
-		fmt.Print(d.Content)
-		content = d.Content
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, nil, err
 	}
-	return think, content
+	logger := log.New(file, "", log.LstdFlags|log.Lmicroseconds)
+	return logger, func() { _ = file.Close() }, nil
 }
 
-func log(u test.User) string {
-	return u.Username + "*******"
-}
-
-func log2(u test.User) string {
-	return "新方法打印"
+func formatJSON(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("%v", value)
+	}
+	return string(encoded)
 }

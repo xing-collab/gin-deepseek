@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -358,10 +359,15 @@ func (llm *LLM) buildToolRequest(messages []map[string]any, tools []Tool, stream
 
 // doToolRequest 发送带 tool 的非流式请求并解析响应。
 func (llm *LLM) doToolRequest(messages []map[string]any, tools []Tool) (*ApiResponse, error) {
+	return llm.doToolRequestContext(context.Background(), messages, tools)
+}
+
+func (llm *LLM) doToolRequestContext(ctx context.Context, messages []map[string]any, tools []Tool) (*ApiResponse, error) {
 	httpReq, err := llm.buildToolRequest(messages, tools, false)
 	if err != nil {
 		return nil, err
 	}
+	httpReq = httpReq.WithContext(ctx)
 
 	response, err := llm.do(httpReq)
 	if err != nil {

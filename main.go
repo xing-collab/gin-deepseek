@@ -40,6 +40,12 @@ func main() {
 		fmt.Println("加载角色卡失败:", err)
 		return
 	}
+	skillPrompt, err := loadSkillPrompt(os.Getenv("AGENT_SKILL_PATH"))
+	if err != nil {
+		logger.Printf("加载 Skill 失败: %v", err)
+		fmt.Println("加载 Skill 失败:", err)
+		return
+	}
 
 	toolRegistry, err := buildToolRegistry()
 	if err != nil {
@@ -62,7 +68,7 @@ func main() {
 		character.Update(input)
 		model := config.ChatAgentModel{
 			Client:       client,
-			SystemPrompt: character.BuildSystemPrompt(),
+			SystemPrompt: joinSystemPrompt(character.BuildSystemPrompt(), skillPrompt),
 			OnReasoning: func(reasoning string) {
 				logger.Printf("[思考] %s", reasoning)
 				if ShowReasoning {
@@ -185,4 +191,26 @@ func formatJSON(value any) string {
 
 func getBirthday(name string) string {
 	return fmt.Sprintf("%s的生日是 2003-08-10", strings.TrimSpace(name))
+}
+
+// loadSkillPrompt 从 AGENT_SKILL_PATH 指定的 Markdown 文件加载 Skill。
+// path 的来源是环境变量；为空表示本次运行不注入额外 Skill。
+func loadSkillPrompt(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+	skill, err := config.LoadSkill(path)
+	if err != nil {
+		return "", err
+	}
+	return skill.Instructions, nil
+}
+
+// joinSystemPrompt 将角色卡提示词和可选 Skill 工作流合并为模型 system prompt。
+func joinSystemPrompt(characterPrompt string, skillPrompt string) string {
+	if strings.TrimSpace(skillPrompt) == "" {
+		return characterPrompt
+	}
+	return characterPrompt + "\n\n## 当前启用的 Skill\n" + skillPrompt
 }

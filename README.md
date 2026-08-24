@@ -71,6 +71,8 @@ ai-test/
 │   ├── openapi.go           # Responses API 客户端
 │   ├── character.go         # 角色卡加载、状态机和 system prompt
 │   ├── memory.go            # 客户端短期历史与裁剪
+│   ├── mcp.go               # MCP 工具发现与调用适配
+│   ├── skill.go             # Skill Markdown 加载和注册
 │   ├── tool.go              # Tool 声明、时间/日期工具和处理器
 │   └── priestess.json       # 示例角色卡
 ├── test/
@@ -78,9 +80,12 @@ ai-test/
 │   └── *_test.go             # 客户端、工具和角色卡测试
 ├── docs/
 │   ├── agent-loop.md         # Agent loop 开发指导
+│   ├── mcp-skill-use.md      # MCP 与 Skill 接入指导
 │   ├── tool-use.md           # 外部工具定义与注入使用手册
 │   ├── streaming-patterns.md # 流式接口说明
 │   └── api-formats-and-tools.md
+├── skills/
+│   └── weather/SKILL.md      # Skill 示例
 ├── go.mod
 └── AGENTS.md                # 仓库开发约定
 ```
@@ -227,6 +232,8 @@ loop := config.AgentLoop{
 两套客户端的请求结构、工具格式、SSE 事件和响应类型不同，不要在业务层混用 wire JSON。需要接入 Agent loop 时，应实现一个 AgentModel 适配器，把协议差异封装在适配器内部。
 
 底层 LLM 和 OpenAPIClient 都提供非流式、回调式、channel 式和 Go 迭代器式流式调用。详细说明见 [docs/streaming-patterns.md](docs/streaming-patterns.md) 和 [docs/api-formats-and-tools.md](docs/api-formats-and-tools.md)。
+
+MCP 工具发现、调用适配以及 Skill 加载方式见 [docs/mcp-skill-use.md](docs/mcp-skill-use.md)。
 
 ## 角色卡运行时
 

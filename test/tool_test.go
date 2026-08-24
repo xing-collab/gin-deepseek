@@ -9,8 +9,26 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+type mockMCPClient struct {
+	tools []MCPTool
+	name  string
+	args  map[string]any
+}
+
+func (m *mockMCPClient) ListTools(context.Context) ([]MCPTool, error) {
+	return m.tools, nil
+}
+
+func (m *mockMCPClient) CallTool(_ context.Context, name string, args map[string]any) (any, error) {
+	m.name = name
+	m.args = args
+	return map[string]any{"ok": true}, nil
+}
 
 func TestChatCompletionsInvokeWithSharedTools(t *testing.T) {
 	var bodies [][]byte
@@ -254,5 +272,64 @@ func TestRegisterReflectFunctionWithContextAndError(t *testing.T) {
 	})
 	if err != nil || result != "8" {
 		t.Fatalf("result=%q err=%v", result, err)
+	}
+}
+
+func TestRegisterMCPTools(t *testing.T) {
+	client := &mockMCPClient{tools: []MCPTool{{
+		Name:        "forecast",
+		Description: "查询天气。",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}},
+	}}}
+	registry := NewToolRegistry()
+	if err := RegisterMCPTools(context.Background(), registry, client, "weather"); err != nil {
+		t.Fatal(err)
+	}
+	tools := registry.Tools()
+	if len(tools) != 1 || tools[0].Function.Name != "mcp_weather_forecast" {
+		t.Fatalf("tools = %#v", tools)
+	}
+	result, err := registry.Execute(context.Background(), AgentToolCall{
+		Name: "mcp_weather_forecast", Arguments: map[string]any{"city": "上海"},
+	})
+	if err != nil || result != `{"ok":true}` {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+	if client.name != "forecast" || client.args["city"] != "上海" {
+		t.Fatalf("MCP call = %q %#v", client.name, client.args)
+	}
+}
+
+func TestSkillRegistry(t *testing.T) {
+	registry := NewSkillRegistry()
+	if err := registry.Register(Skill{Name: "weather", Instructions: "查询天气时使用工具。"}); err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := registry.Prompt("weather")
+	if err != nil || prompt != "查询天气时使用工具。" {
+		t.Fatalf("prompt=%q err=%v", prompt, err)
+	}
+	if _, err := registry.Prompt("missing"); err == nil {
+		t.Fatal("expected missing skill error")
+	}
+}
+
+func TestLoadSkillUsesMarkdownTitle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "SKILL.md")
+	if err := os.WriteFile(path, []byte("# 天气查询\n\n使用天气工具。"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	skill, err := LoadSkill(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skill.Name != "天气查询" || skill.SourcePath != path {
+		t.Fatalf("skill = %#v", skill)
+	}
+}
+
+func TestMCPToolNameRejectsUnsupportedName(t *testing.T) {
+	if got := MCPToolName("服务", "天气"); got != "" {
+		t.Fatalf("tool name = %q, want empty", got)
 	}
 }

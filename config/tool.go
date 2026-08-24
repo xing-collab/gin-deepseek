@@ -54,9 +54,12 @@ type RegisteredToolHandler func(ctx context.Context, args map[string]any) (strin
 // ToolParameter 描述反射注册函数的一个参数。
 // 参数类型由函数签名推断，注册时只需要提供模型可见的名称和说明。
 type ToolParameter struct {
-	Name        string
+	// Name 来源于注册调用方；意义是模型参数 JSON 中使用的字段名。
+	Name string
+	// Description 来源于注册调用方；意义是告诉模型该参数应填写什么内容。
 	Description string
-	Required    bool
+	// Required 来源于业务约束；意义是控制 JSON Schema required 和执行前缺参检查。
+	Required bool
 }
 
 type registeredTool struct {
@@ -183,7 +186,8 @@ func RegisterTypedFunctionWithoutContext[T any](
 
 // RegisterReflectFunction 注册普通 Go 函数，不要求业务方法接收 map 或自定义参数结构体。
 // 支持 func(T...) string、func(T...) (string, error)，以及在首参数位置接收 context.Context。
-// 参数名称和说明通过 parameters 提供，参数类型和 JSON Schema 由函数签名自动推断。
+// name 和 description 由业务方提供并发送给模型；handler 是本地普通 Go 函数；
+// parameters 按函数参数顺序提供模型可见名称、说明和必填约束，参数类型由函数签名推断。
 func (r *ToolRegistry) RegisterReflectFunction(
 	name string,
 	description string,

@@ -85,7 +85,8 @@ ai-test/
 │   ├── streaming-patterns.md # 流式接口说明
 │   └── api-formats-and-tools.md
 ├── skills/
-│   └── weather/SKILL.md      # Skill 示例
+│   ├── time/SKILL.md          # 时间感知与时段纠正
+│   └── weather/SKILL.md       # Skill 示例
 ├── go.mod
 └── AGENTS.md                # 仓库开发约定
 ```

@@ -210,6 +210,22 @@ if err != nil {
 
 生产场景不建议每轮把全部 Skill 加入上下文。应根据用户任务、路由模型或程序规则选择少量相关 Skill，再拼接到 system prompt。
 
+### 时间 Skill 示例
+
+项目内置 [skills/time/SKILL.md](../skills/time/SKILL.md)。`main.go` 会先用程序规则检测时间相关关键词，命中后才注入该 Skill；Skill 再要求模型先调用 `get_current_time`，最后根据真实时段回复。
+
+```text
+用户：早上好
+    ↓ 命中“早上”
+注入时间 Skill
+    ↓
+模型调用 get_current_time
+    ↓ 返回 12:00:00
+模型：现在已经是中午了，午安……
+```
+
+这里的关键词检测只是路由，不负责判断当前时间。当前时间必须来自工具结果；Skill 也明确禁止模型直接顺着用户的时段判断回答。
+
 ## 6. 推荐目录结构
 
 ```text

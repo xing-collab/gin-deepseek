@@ -8,6 +8,36 @@ import (
 	"sync"
 )
 
+// ContainsTimeIntent 判断文本是否涉及时间、日期、时段或时间问候。
+// input 来源于用户消息；返回 true 时，调用方可以注入时间 Skill。
+func ContainsTimeIntent(input string) bool {
+	input = strings.ToLower(strings.TrimSpace(input))
+	keywords := []string{
+		"时间", "几点", "几号", "日期", "今天", "现在", "当前",
+		"早上", "上午", "中午", "下午", "傍晚", "晚上", "晚安", "凌晨",
+		"morning", "afternoon", "evening", "night", "time", "date",
+		"good morning", "good afternoon", "good evening", "good night",
+	}
+	for _, keyword := range keywords {
+		if strings.Contains(input, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// JoinSkillPrompts 合并多个 Skill 正文，空文本会被忽略。
+// prompts 来源于已加载的 Skill；返回值可直接追加到 system prompt。
+func JoinSkillPrompts(prompts ...string) string {
+	parts := make([]string, 0, len(prompts))
+	for _, prompt := range prompts {
+		if prompt = strings.TrimSpace(prompt); prompt != "" {
+			parts = append(parts, prompt)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 // Skill 保存一份可注入 Agent system prompt 的工作流说明。
 // Name 和 Description 用于选择 Skill；Instructions 是实际注入模型的正文。
 type Skill struct {

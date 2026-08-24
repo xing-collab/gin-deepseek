@@ -46,6 +46,12 @@ func main() {
 		fmt.Println("加载 Skill 失败:", err)
 		return
 	}
+	timeSkillPrompt, err := loadSkillPrompt("skills/time/SKILL.md")
+	if err != nil {
+		logger.Printf("加载时间 Skill 失败: %v", err)
+		fmt.Println("加载时间 Skill 失败:", err)
+		return
+	}
 
 	toolRegistry, err := buildToolRegistry()
 	if err != nil {
@@ -66,9 +72,13 @@ func main() {
 		}
 
 		character.Update(input)
+		activeSkillPrompt := skillPrompt
+		if config.ContainsTimeIntent(input) {
+			activeSkillPrompt = config.JoinSkillPrompts(activeSkillPrompt, timeSkillPrompt)
+		}
 		model := config.ChatAgentModel{
 			Client:       client,
-			SystemPrompt: joinSystemPrompt(character.BuildSystemPrompt(), skillPrompt),
+			SystemPrompt: joinSystemPrompt(character.BuildSystemPrompt(), activeSkillPrompt),
 			OnReasoning: func(reasoning string) {
 				logger.Printf("[思考] %s", reasoning)
 				if ShowReasoning {

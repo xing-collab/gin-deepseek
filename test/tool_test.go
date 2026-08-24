@@ -333,3 +333,20 @@ func TestMCPToolNameRejectsUnsupportedName(t *testing.T) {
 		t.Fatalf("tool name = %q, want empty", got)
 	}
 }
+
+func TestContainsTimeIntent(t *testing.T) {
+	for _, input := range []string{"早上好", "现在几点", "Good evening"} {
+		if !ContainsTimeIntent(input) {
+			t.Fatalf("containsTimeIntent(%q) = false", input)
+		}
+	}
+	if ContainsTimeIntent("帮我写一首诗") {
+		t.Fatal("unexpected time intent")
+	}
+}
+
+func TestJoinSkillPrompts(t *testing.T) {
+	if got := JoinSkillPrompts(" A ", "", "B "); got != "A\n\nB" {
+		t.Fatalf("joined prompt = %q", got)
+	}
+}

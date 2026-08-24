@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -49,6 +50,14 @@ type OpenAPITool struct {
 // RegisteredToolHandler 是外部工具实现的统一签名。
 // args 来自模型返回的 JSON 参数，返回值会作为 tool 消息交回模型。
 type RegisteredToolHandler func(ctx context.Context, args map[string]any) (string, error)
+
+// ToolParameter 描述反射注册函数的一个参数。
+// 参数类型由函数签名推断，注册时只需要提供模型可见的名称和说明。
+type ToolParameter struct {
+	Name        string
+	Description string
+	Required    bool
+}
 
 type registeredTool struct {
 	declaration Tool
@@ -170,6 +179,190 @@ func RegisterTypedFunctionWithoutContext[T any](
 	handler func(T) (string, error),
 ) error {
 	return r.RegisterFunction(name, description, parameters, AdaptTypedHandlerWithoutContext(handler))
+}
+
+// RegisterReflectFunction 注册普通 Go 函数，不要求业务方法接收 map 或自定义参数结构体。
+// 支持 func(T...) string、func(T...) (string, error)，以及在首参数位置接收 context.Context。
+// 参数名称和说明通过 parameters 提供，参数类型和 JSON Schema 由函数签名自动推断。
+func (r *ToolRegistry) RegisterReflectFunction(
+	name string,
+	description string,
+	handler any,
+	parameters ...ToolParameter,
+) error {
+	fn, err := newReflectToolHandler(handler, parameters)
+	if err != nil {
+		return err
+	}
+	declaration, err := reflectToolDeclaration(name, description, handler, parameters)
+	if err != nil {
+		return err
+	}
+	return r.Register(declaration, fn)
+}
+
+var (
+	contextType = reflect.TypeOf((*context.Context)(nil)).Elem()
+	errorType   = reflect.TypeOf((*error)(nil)).Elem()
+)
+
+func reflectFunctionType(handler any) (reflect.Type, error) {
+	if handler == nil {
+		return nil, ErrToolHandlerNil
+	}
+	typ := reflect.TypeOf(handler)
+	if typ.Kind() != reflect.Func {
+		return nil, fmt.Errorf("tool handler must be a function, got %s", typ.Kind())
+	}
+	if typ.IsVariadic() {
+		return nil, errors.New("variadic tool handlers are not supported")
+	}
+	return typ, nil
+}
+
+func reflectArgumentTypes(handler any) ([]reflect.Type, error) {
+	typ, err := reflectFunctionType(handler)
+	if err != nil {
+		return nil, err
+	}
+	start := 0
+	if typ.NumIn() > 0 && typ.In(0).Implements(contextType) {
+		start = 1
+	}
+	args := make([]reflect.Type, typ.NumIn()-start)
+	for i := range args {
+		args[i] = typ.In(start + i)
+	}
+	return args, nil
+}
+
+func newReflectToolHandler(handler any, parameters []ToolParameter) (RegisteredToolHandler, error) {
+	typ, err := reflectFunctionType(handler)
+	if err != nil {
+		return nil, err
+	}
+	argTypes, err := reflectArgumentTypes(handler)
+	if err != nil {
+		return nil, err
+	}
+	if len(parameters) != len(argTypes) {
+		return nil, fmt.Errorf("tool parameter count = %d, want %d", len(parameters), len(argTypes))
+	}
+	if typ.NumOut() != 1 && typ.NumOut() != 2 {
+		return nil, errors.New("tool handler must return string or (string, error)")
+	}
+	if typ.Out(0).Kind() != reflect.String {
+		return nil, errors.New("tool handler first return value must be string")
+	}
+	if typ.NumOut() == 2 && !typ.Out(1).Implements(errorType) {
+		return nil, errors.New("tool handler second return value must be error")
+	}
+
+	fn := reflect.ValueOf(handler)
+	return func(ctx context.Context, values map[string]any) (string, error) {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		callArgs := make([]reflect.Value, 0, typ.NumIn())
+		if typ.NumIn() > 0 && typ.In(0).Implements(contextType) {
+			callArgs = append(callArgs, reflect.ValueOf(ctx))
+		}
+		for i, parameter := range parameters {
+			value, exists := values[parameter.Name]
+			if !exists || value == nil {
+				if parameter.Required {
+					return "", fmt.Errorf("missing required tool argument %q", parameter.Name)
+				}
+				callArgs = append(callArgs, reflect.Zero(argTypes[i]))
+				continue
+			}
+			converted, err := decodeReflectArgument(value, argTypes[i])
+			if err != nil {
+				return "", fmt.Errorf("parse tool argument %q: %w", parameter.Name, err)
+			}
+			callArgs = append(callArgs, converted)
+		}
+
+		results := fn.Call(callArgs)
+		if typ.NumOut() == 2 && !results[1].IsNil() {
+			return "", results[1].Interface().(error)
+		}
+		return results[0].String(), nil
+	}, nil
+}
+
+func decodeReflectArgument(value any, typ reflect.Type) (reflect.Value, error) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return reflect.Value{}, err
+	}
+	target := reflect.New(typ)
+	if err := json.Unmarshal(payload, target.Interface()); err != nil {
+		return reflect.Value{}, err
+	}
+	return target.Elem(), nil
+}
+
+func reflectToolDeclaration(name, description string, handler any, parameters []ToolParameter) (Tool, error) {
+	argTypes, err := reflectArgumentTypes(handler)
+	if err != nil {
+		return Tool{}, err
+	}
+	properties := make(map[string]any, len(parameters))
+	required := make([]any, 0, len(parameters))
+	for i, parameter := range parameters {
+		if parameter.Name == "" {
+			return Tool{}, ErrToolNameEmpty
+		}
+		property := schemaForReflectType(argTypes[i])
+		if parameter.Description != "" {
+			property["description"] = parameter.Description
+		}
+		properties[parameter.Name] = property
+		if parameter.Required {
+			required = append(required, parameter.Name)
+		}
+	}
+	schema := map[string]any{
+		"type":                 "object",
+		"properties":           properties,
+		"additionalProperties": false,
+	}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return Tool{Type: "function", Function: Function{
+		Name: name, Description: description, Parameters: schema,
+	}}, nil
+}
+
+func schemaForReflectType(typ reflect.Type) map[string]any {
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	schema := map[string]any{}
+	switch typ.Kind() {
+	case reflect.String:
+		schema["type"] = "string"
+	case reflect.Bool:
+		schema["type"] = "boolean"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		schema["type"] = "integer"
+	case reflect.Float32, reflect.Float64:
+		schema["type"] = "number"
+	case reflect.Slice, reflect.Array:
+		schema["type"] = "array"
+		schema["items"] = schemaForReflectType(typ.Elem())
+	case reflect.Map, reflect.Struct:
+		schema["type"] = "object"
+	default:
+		schema["type"] = "string"
+	}
+	return schema
 }
 
 // Tools 返回按注册顺序排列的工具声明副本。

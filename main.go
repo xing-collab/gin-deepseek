@@ -115,48 +115,46 @@ func main() {
 // buildToolRegistry 演示如何在 config 包外定义方法，并注册给 Agent 调用。
 func buildToolRegistry() (*config.ToolRegistry, error) {
 	registry := config.NewToolRegistry()
-	if err := registry.RegisterFunction(
-		"get_current_time",
-		"获取当前本地时间，格式为 HH:mm:ss。",
-		config.EmptyObjectSchema(),
-		func(_ context.Context, _ map[string]any) (string, error) {
-			return getCurrentTime(), nil
+	tools := []struct {
+		name        string
+		description string
+		handler     any
+		parameters  []config.ToolParameter
+	}{
+		{
+			name:        "get_current_time",
+			description: "获取当前本地时间，格式为 HH:mm:ss。",
+			handler:     getCurrentTime,
 		},
-	); err != nil {
-		return nil, err
-	}
-	if err := registry.RegisterFunction(
-		"get_current_date",
-		"获取当前本地日期，格式为 YYYY-MM-DD。",
-		config.EmptyObjectSchema(),
-		func(_ context.Context, _ map[string]any) (string, error) {
-			return getCurrentDate(), nil
+		{
+			name:        "get_current_date",
+			description: "获取当前本地日期，格式为 YYYY-MM-DD。",
+			handler:     getCurrentDate,
 		},
-	); err != nil {
-		return nil, err
-	}
-	if err := config.RegisterTypedFunction(
-		registry,
-		"get_birthday",
-		"传递名称，获取用户生日。",
-		map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"name": map[string]any{
-					"type":        "string",
-					"description": "用户姓名。",
-				},
+		{
+			name:        "get_birthday",
+			description: "根据姓名获取用户生日。",
+			handler:     getBirthday,
+			parameters: []config.ToolParameter{
+				{Name: "name", Description: "用户姓名。", Required: true},
 			},
-			"required":             []any{"name"},
-			"additionalProperties": false,
 		},
-		getBirthdayByArgs,
-	); err != nil {
-		return nil, err
+	}
+
+	for _, tool := range tools {
+		if err := registry.RegisterReflectFunction(
+			tool.name,
+			tool.description,
+			tool.handler,
+			tool.parameters...,
+		); err != nil {
+			return nil, fmt.Errorf("注册工具 %q: %w", tool.name, err)
+		}
 	}
 	return registry, nil
 }
 
+// 以下方法是普通业务函数，不需要依赖 Agent 的参数类型。
 func getCurrentTime() string {
 	return time.Now().Format("15:04:05")
 }
@@ -185,19 +183,6 @@ func formatJSON(value any) string {
 	return string(encoded)
 }
 
-func getSheng(name string) string {
-	s := "2003-08-10"
-	name += s
-	return name
-}
-
-type birthdayArgs struct {
-	Name string `json:"name"`
-}
-
-func getBirthdayByArgs(_ context.Context, args birthdayArgs) (string, error) {
-	if strings.TrimSpace(args.Name) == "" {
-		return "", fmt.Errorf("参数 name 必须是非空字符串")
-	}
-	return getSheng(args.Name), nil
+func getBirthday(name string) string {
+	return fmt.Sprintf("%s的生日是 2003-08-10", strings.TrimSpace(name))
 }

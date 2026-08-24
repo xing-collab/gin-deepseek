@@ -207,3 +207,52 @@ func TestRegisterTypedFunction(t *testing.T) {
 		t.Fatalf("result=%q err=%v", result, err)
 	}
 }
+
+func TestRegisterReflectFunction(t *testing.T) {
+	registry := NewToolRegistry()
+	err := registry.RegisterReflectFunction(
+		"greet",
+		"向用户问候。",
+		func(name string) string { return "你好，" + name },
+		ToolParameter{Name: "name", Description: "姓名。", Required: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := registry.Tools()
+	if got := tools[0].Function.Parameters["properties"].(map[string]any)["name"].(map[string]any)["type"]; got != "string" {
+		t.Fatalf("inferred schema type = %v", got)
+	}
+	result, err := registry.Execute(context.Background(), AgentToolCall{
+		Name:      "greet",
+		Arguments: map[string]any{"name": "小明"},
+	})
+	if err != nil || result != "你好，小明" {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+}
+
+func TestRegisterReflectFunctionWithContextAndError(t *testing.T) {
+	registry := NewToolRegistry()
+	err := registry.RegisterReflectFunction(
+		"double",
+		"计算两倍数值。",
+		func(ctx context.Context, value int) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("%d", value*2), nil
+		},
+		ToolParameter{Name: "value", Required: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := registry.Execute(context.Background(), AgentToolCall{
+		Name:      "double",
+		Arguments: map[string]any{"value": 4.0},
+	})
+	if err != nil || result != "8" {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+}

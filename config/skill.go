@@ -1,42 +1,13 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 )
-
-// ContainsTimeIntent 判断文本是否涉及时间、日期、时段或时间问候。
-// input 来源于用户消息；返回 true 时，调用方可以注入时间 Skill。
-func ContainsTimeIntent(input string) bool {
-	input = strings.ToLower(strings.TrimSpace(input))
-	keywords := []string{
-		"时间", "几点", "几号", "日期", "今天", "现在", "当前",
-		"早上", "上午", "中午", "下午", "傍晚", "晚上", "晚安", "凌晨",
-		"morning", "afternoon", "evening", "night", "time", "date",
-		"good morning", "good afternoon", "good evening", "good night",
-	}
-	for _, keyword := range keywords {
-		if strings.Contains(input, keyword) {
-			return true
-		}
-	}
-	return false
-}
-
-// JoinSkillPrompts 合并多个 Skill 正文，空文本会被忽略。
-// prompts 来源于已加载的 Skill；返回值可直接追加到 system prompt。
-func JoinSkillPrompts(prompts ...string) string {
-	parts := make([]string, 0, len(prompts))
-	for _, prompt := range prompts {
-		if prompt = strings.TrimSpace(prompt); prompt != "" {
-			parts = append(parts, prompt)
-		}
-	}
-	return strings.Join(parts, "\n\n")
-}
 
 // Skill 保存一份可注入 Agent system prompt 的工作流说明。
 // Name 和 Description 用于选择 Skill；Instructions 是实际注入模型的正文。
@@ -51,6 +22,14 @@ type Skill struct {
 	SourcePath string
 }
 
+// SkillSummary is the lightweight metadata exposed before a Skill is loaded.
+// It is intentionally small so many Skills can be indexed cheaply.
+type SkillSummary struct {
+	Name        string
+	Description string
+	SourcePath  string
+}
+
 // LoadSkill 从 Markdown 文件加载 Skill。path 由应用配置或环境变量提供。
 // 文件第一行若是“# 标题”，标题会作为默认 Name；正文保留为 Instructions。
 func LoadSkill(path string) (Skill, error) {
@@ -58,15 +37,19 @@ func LoadSkill(path string) (Skill, error) {
 	if err != nil {
 		return Skill{}, fmt.Errorf("读取 Skill %q: %w", path, err)
 	}
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	instructions := string(data)
-	lines := strings.Split(instructions, "\n")
-	if len(lines) > 0 {
-		if title := strings.TrimSpace(lines[0]); strings.HasPrefix(title, "# ") {
-			name = strings.TrimSpace(strings.TrimPrefix(title, "# "))
-		}
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	description := ""
+	frontmatter, body := parseSkillFrontmatter(instructions)
+	if value := frontmatter["name"]; value != "" {
+		name = value
+	} else if title := firstMarkdownTitle(body); title != "" {
+		name = title
 	}
-	return Skill{Name: name, Instructions: instructions, SourcePath: path}, nil
+	if value := frontmatter["description"]; value != "" {
+		description = value
+	}
+	return Skill{Name: name, Description: description, Instructions: body, SourcePath: path}, nil
 }
 
 // SkillRegistry 保存可供 Agent 选择的 Skill。
@@ -74,12 +57,17 @@ func LoadSkill(path string) (Skill, error) {
 type SkillRegistry struct {
 	mu     sync.RWMutex
 	order  []string
-	skills map[string]Skill
+	skills map[string]skillEntry
+}
+
+type skillEntry struct {
+	summary SkillSummary
+	skill   *Skill
 }
 
 // NewSkillRegistry 创建空 Skill 注册表。
 func NewSkillRegistry() *SkillRegistry {
-	return &SkillRegistry{skills: make(map[string]Skill)}
+	return &SkillRegistry{skills: make(map[string]skillEntry)}
 }
 
 // Register 将 Skill 加入注册表；Name 为空或重复时返回错误。
@@ -95,26 +83,77 @@ func (r *SkillRegistry) Register(skill Skill) error {
 		return fmt.Errorf("skill %q instructions are empty", name)
 	}
 	skill.Name = name
+	summary := SkillSummary{Name: name, Description: strings.TrimSpace(skill.Description), SourcePath: skill.SourcePath}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.skills == nil {
-		r.skills = make(map[string]Skill)
+		r.skills = make(map[string]skillEntry)
 	}
 	if _, exists := r.skills[name]; exists {
 		return fmt.Errorf("skill is already registered: %s", name)
 	}
-	r.skills[name] = skill
+	r.skills[name] = skillEntry{summary: summary, skill: &skill}
 	r.order = append(r.order, name)
+	return nil
+}
+
+// Discover scans a directory for immediate child directories containing
+// SKILL.md files. Only frontmatter metadata is indexed; the Markdown body is
+// loaded later by Prompt or ReadResource.
+func (r *SkillRegistry) Discover(root string) error {
+	if r == nil {
+		return fmt.Errorf("skill registry is nil")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("scan skills directory %q: %w", root, err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		path := filepath.Join(root, entry.Name(), "SKILL.md")
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if err := r.RegisterPath(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RegisterPath indexes one SKILL.md without loading its body into the prompt.
+func (r *SkillRegistry) RegisterPath(path string) error {
+	if r == nil {
+		return fmt.Errorf("skill registry is nil")
+	}
+	summary, err := readSkillSummary(path)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.skills == nil {
+		r.skills = make(map[string]skillEntry)
+	}
+	if existing, exists := r.skills[summary.Name]; exists {
+		if existing.summary.SourcePath == summary.SourcePath {
+			return nil
+		}
+		return fmt.Errorf("skill is already registered: %s", summary.Name)
+	}
+	r.skills[summary.Name] = skillEntry{summary: summary}
+	r.order = append(r.order, summary.Name)
 	return nil
 }
 
 // Load 从 Markdown 文件读取并注册 Skill。
 func (r *SkillRegistry) Load(path string) error {
-	skill, err := LoadSkill(path)
-	if err != nil {
-		return err
-	}
-	return r.Register(skill)
+	return r.RegisterPath(path)
 }
 
 // Get 按名称获取 Skill；返回值是副本。
@@ -123,9 +162,28 @@ func (r *SkillRegistry) Get(name string) (Skill, bool) {
 		return Skill{}, false
 	}
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	skill, ok := r.skills[name]
-	return skill, ok
+	entry, ok := r.skills[name]
+	if !ok {
+		r.mu.RUnlock()
+		return Skill{}, false
+	}
+	if entry.skill != nil {
+		r.mu.RUnlock()
+		return *entry.skill, true
+	}
+	path := entry.summary.SourcePath
+	r.mu.RUnlock()
+	skill, err := LoadSkill(path)
+	if err != nil {
+		return Skill{}, false
+	}
+	r.mu.Lock()
+	if current, exists := r.skills[name]; exists {
+		current.skill = &skill
+		r.skills[name] = current
+	}
+	r.mu.Unlock()
+	return skill, true
 }
 
 // Prompt 返回指定 Skill 的注入文本。name 来源于应用的 Skill 选择逻辑。
@@ -146,4 +204,168 @@ func (r *SkillRegistry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return append([]string(nil), r.order...)
+}
+
+// Summaries returns the lightweight index in registration order.
+func (r *SkillRegistry) Summaries() []SkillSummary {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]SkillSummary, 0, len(r.order))
+	for _, name := range r.order {
+		out = append(out, r.skills[name].summary)
+	}
+	return out
+}
+
+// CatalogPrompt formats the lightweight index for a system prompt.
+func (r *SkillRegistry) CatalogPrompt() string {
+	items := r.Summaries()
+	if len(items) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	builder.WriteString("## 可用 Skill 索引\n")
+	builder.WriteString("以下只有 Skill 的名称和描述。需要使用某个 Skill 时，调用 read_skill 读取完整 SKILL.md；不要假设未加载的细节。\n")
+	for _, item := range items {
+		builder.WriteString("- ")
+		builder.WriteString(item.Name)
+		if item.Description != "" {
+			builder.WriteString(": ")
+			builder.WriteString(item.Description)
+		}
+		builder.WriteByte('\n')
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+// ReadResource loads a Skill body or a file beneath its directory. Resource
+// paths are restricted to the Skill directory to prevent path traversal.
+func (r *SkillRegistry) ReadResource(name, resourcePath string) (string, error) {
+	summary, ok := r.summary(name)
+	if !ok {
+		return "", fmt.Errorf("skill not found: %s", name)
+	}
+	base := filepath.Dir(summary.SourcePath)
+	if strings.TrimSpace(resourcePath) == "" {
+		resourcePath = "SKILL.md"
+	}
+	path := filepath.Join(base, filepath.Clean(resourcePath))
+	rel, err := filepath.Rel(base, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("skill resource path escapes skill directory")
+	}
+	if rel != "SKILL.md" && !strings.HasPrefix(rel, "references"+string(filepath.Separator)) && !strings.HasPrefix(rel, "scripts"+string(filepath.Separator)) && !strings.HasPrefix(rel, "assets"+string(filepath.Separator)) {
+		return "", fmt.Errorf("skill resource must be SKILL.md, references/, scripts/, or assets/")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read skill resource %q: %w", resourcePath, err)
+	}
+	return string(data), nil
+}
+
+func (r *SkillRegistry) summary(name string) (SkillSummary, bool) {
+	if r == nil {
+		return SkillSummary{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, ok := r.skills[name]
+	return entry.summary, ok
+}
+
+func readSkillSummary(path string) (SkillSummary, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return SkillSummary{}, fmt.Errorf("读取 Skill %q: %w", path, err)
+	}
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	description := ""
+	frontmatter, body := parseSkillFrontmatter(string(data))
+	if value := frontmatter["name"]; value != "" {
+		name = value
+	} else if title := firstMarkdownTitle(body); title != "" {
+		name = title
+	}
+	if value := frontmatter["description"]; value != "" {
+		description = value
+	}
+	return SkillSummary{Name: name, Description: description, SourcePath: path}, nil
+}
+
+func parseSkillFrontmatter(content string) (map[string]string, string) {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	metadata := make(map[string]string)
+	if len(lines) < 3 || strings.TrimSpace(lines[0]) != "---" {
+		return metadata, content
+	}
+	end := -1
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			end = i
+			break
+		}
+		key, value, ok := strings.Cut(lines[i], ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), "\"'")
+		if key != "" {
+			metadata[key] = value
+		}
+	}
+	if end < 0 {
+		return make(map[string]string), content
+	}
+	return metadata, strings.Join(lines[end+1:], "\n")
+}
+
+func firstMarkdownTitle(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "# ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "# "))
+		}
+	}
+	return ""
+}
+
+// RegisterSkillTools exposes the progressive-disclosure read_skill tool. The
+// catalog remains in the system prompt; full instructions and resources are
+// loaded only when the model explicitly requests a known Skill.
+func RegisterSkillTools(registry *ToolRegistry, skills *SkillRegistry) error {
+	if registry == nil {
+		return ErrToolRegistryNil
+	}
+	if skills == nil {
+		return fmt.Errorf("skill registry is nil")
+	}
+	return registry.RegisterFunction(
+		"read_skill",
+		"按名称加载 Skill 的完整 SKILL.md，或按需读取其 references/、scripts/、assets/资源。只能读取索引中存在的 Skill。",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{
+					"type":        "string",
+					"description": "Skill 索引中的名称。",
+				},
+				"path": map[string]any{
+					"type":        "string",
+					"description": "可选资源路径；留空读取 SKILL.md，只允许 references/、scripts/、assets/。",
+				},
+			},
+			"required":             []any{"name"},
+			"additionalProperties": false,
+		},
+		func(_ context.Context, args map[string]any) (string, error) {
+			name, _ := args["name"].(string)
+			path, _ := args["path"].(string)
+			return skills.ReadResource(strings.TrimSpace(name), strings.TrimSpace(path))
+		},
+	)
 }

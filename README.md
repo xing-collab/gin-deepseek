@@ -83,6 +83,7 @@ ai-test/
 │   ├── agent_test.go         # Agent loop 和 Chat 适配器测试
 │   └── *_test.go             # 客户端、工具和角色卡测试
 ├── docs/
+│   ├── README.md            # 文档分类索引和推荐阅读顺序
 │   ├── agent-loop.md         # Agent loop 开发指导
 │   ├── mcp-skill-use.md      # MCP 与 Skill 接入指导
 │   ├── mcp-stdio.md          # Open-Meteo 服务和各客户端配置
@@ -239,7 +240,7 @@ loop := config.AgentLoop{
 
 底层 LLM 和 OpenAPIClient 都提供非流式、回调式、channel 式和 Go 迭代器式流式调用。详细说明见 [docs/streaming-patterns.md](docs/streaming-patterns.md) 和 [docs/api-formats-and-tools.md](docs/api-formats-and-tools.md)。
 
-MCP 工具发现、调用适配以及 Skill 加载方式见 [docs/mcp-skill-use.md](docs/mcp-skill-use.md)；本项目实际使用的 stdio 天气服务配置见 [docs/mcp-stdio.md](docs/mcp-stdio.md)。
+文档总索引见 [docs/README.md](docs/README.md)。MCP、本地 Tool 与 Skill 的职责和接入方式见 [docs/mcp-skill-use.md](docs/mcp-skill-use.md)；stdio/HTTP MCP 的差异及当前支持状态见 [docs/mcp-stdio.md](docs/mcp-stdio.md)。当前项目只实现 stdio MCP，尚未实现 Streamable HTTP MCP client。
 
 ## 角色卡运行时
 

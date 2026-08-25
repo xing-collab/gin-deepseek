@@ -40,20 +40,21 @@ func main() {
 		fmt.Println("加载角色卡失败:", err)
 		return
 	}
-	skillPrompt, err := loadSkillPrompt(os.Getenv("AGENT_SKILL_PATH"))
-	if err != nil {
-		logger.Printf("加载 Skill 失败: %v", err)
-		fmt.Println("加载 Skill 失败:", err)
+	skills := config.NewSkillRegistry()
+	if err := skills.Discover("skills"); err != nil {
+		logger.Printf("索引 Skill 失败: %v", err)
+		fmt.Println("索引 Skill 失败:", err)
 		return
 	}
-	timeSkillPrompt, err := loadSkillPrompt("skills/time/SKILL.md")
-	if err != nil {
-		logger.Printf("加载时间 Skill 失败: %v", err)
-		fmt.Println("加载时间 Skill 失败:", err)
-		return
+	if path := strings.TrimSpace(os.Getenv("AGENT_SKILL_PATH")); path != "" {
+		if err := skills.RegisterPath(path); err != nil {
+			logger.Printf("索引额外 Skill 失败: %v", err)
+			fmt.Println("索引额外 Skill 失败:", err)
+			return
+		}
 	}
 
-	toolRegistry, closeMCP, err := buildToolRegistry(context.Background())
+	toolRegistry, closeMCP, err := buildToolRegistry(context.Background(), skills)
 	if err != nil {
 		logger.Printf("注册 Agent 工具失败: %v", err)
 		fmt.Println("注册 Agent 工具失败:", err)
@@ -73,13 +74,9 @@ func main() {
 		}
 
 		character.Update(input)
-		activeSkillPrompt := skillPrompt
-		if config.ContainsTimeIntent(input) {
-			activeSkillPrompt = config.JoinSkillPrompts(activeSkillPrompt, timeSkillPrompt)
-		}
 		model := config.ChatAgentModel{
 			Client:       client,
-			SystemPrompt: joinSystemPrompt(character.BuildSystemPrompt(), activeSkillPrompt),
+			SystemPrompt: joinSystemPrompt(character.BuildSystemPrompt(), skills.CatalogPrompt()),
 			OnReasoning: func(reasoning string) {
 				logger.Printf("[思考] %s", reasoning)
 				if ShowReasoning {
@@ -130,7 +127,7 @@ func main() {
 }
 
 // buildToolRegistry 演示如何在 config 包外定义方法，并注册给 Agent 调用。
-func buildToolRegistry(ctx context.Context) (*config.ToolRegistry, func(), error) {
+func buildToolRegistry(ctx context.Context, skills *config.SkillRegistry) (*config.ToolRegistry, func(), error) {
 	registry := config.NewToolRegistry()
 	tools := []struct {
 		name        string
@@ -167,6 +164,9 @@ func buildToolRegistry(ctx context.Context) (*config.ToolRegistry, func(), error
 		); err != nil {
 			return nil, func() {}, fmt.Errorf("注册工具 %q: %w", tool.name, err)
 		}
+	}
+	if err := config.RegisterSkillTools(registry, skills); err != nil {
+		return nil, func() {}, fmt.Errorf("注册 Skill 工具: %w", err)
 	}
 
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("MCP_WEATHER_ENABLED")), "false") {
@@ -227,21 +227,7 @@ func getBirthday(name string) string {
 	return fmt.Sprintf("%s的生日是 2003-08-10", strings.TrimSpace(name))
 }
 
-// loadSkillPrompt 从 AGENT_SKILL_PATH 指定的 Markdown 文件加载 Skill。
-// path 的来源是环境变量；为空表示本次运行不注入额外 Skill。
-func loadSkillPrompt(path string) (string, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "", nil
-	}
-	skill, err := config.LoadSkill(path)
-	if err != nil {
-		return "", err
-	}
-	return skill.Instructions, nil
-}
-
-// joinSystemPrompt 将角色卡提示词和可选 Skill 工作流合并为模型 system prompt。
+// joinSystemPrompt 将角色卡提示词和 Skill 目录合并为模型 system prompt。
 func joinSystemPrompt(characterPrompt string, skillPrompt string) string {
 	if strings.TrimSpace(skillPrompt) == "" {
 		return characterPrompt

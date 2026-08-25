@@ -400,16 +400,7 @@ func (llm *LLM) InvokeWithTools(prompt string, content string, tools []Tool) (*A
 
 ## 五、对接 MCP（Model Context Protocol）
 
-### MCP 是什么
-
-MCP（Model Context Protocol）是 Anthropic 提出的**开放协议**，标准化「LLM 应用」和「外部工具/数据源」之间的通信。它把工具定义和调用统一成一套 JSON-RPC 2.0 消息，让任意 LLM 客户端都能接入任意 MCP server 暴露的工具——不用再为每个工具硬编码。
-
-架构上分两方：
-
-- **MCP server**：暴露工具（tools）、资源（resources）、提示词（prompts）的服务，可以是一个本地子进程（stdio）或一个 HTTP 服务。
-- **MCP client**：连接 server、发现工具、调用工具的一方（你的 Go 客户端，或 Claude Code）。
-
-核心方法：
+MCP 通过 JSON-RPC 标准化 Agent 应用和外部工具服务之间的通信。对当前项目有用的核心方法是：
 
 | 方法 | 作用 |
 |---|---|
@@ -417,168 +408,29 @@ MCP（Model Context Protocol）是 Anthropic 提出的**开放协议**，标准�
 | `tools/list` | 列出 server 暴露的所有工具 |
 | `tools/call` | 调用某个工具，传参数，拿结果 |
 
-三种传输方式：
+常见传输方式：
 
 | 传输 | 场景 |
 |---|---|
-| stdio | server 是本地子进程，通过 stdin/stdout 通信（最常见） |
-| Streamable HTTP | server 是远程 HTTP 服务（2025 新规范） |
-| SSE（旧） | 老式 HTTP + SSE 流 |
+| stdio | client 启动本地 server 子进程，通过 stdin/stdout 通信 |
+| Streamable HTTP | client 连接独立部署的 HTTP endpoint |
+| SSE（旧） | 旧版 HTTP + SSE transport |
 
-### 方式一：代码层面（Go 客户端连 MCP server）
+MCP 不代替模型 function calling。`tools/list` 得到的工具会转换为模型的 `tools` 声明；模型返回 tool call 后，程序再通过 `tools/call` 执行。
 
-用社区主流的 `mark3labs/mcp-go`（官方还有 `modelcontextprotocol/go-sdk`）。核心四步：
-
-```go
-import (
-    "github.com/mark3labs/mcp-go/client"
-    "github.com/mark3labs/mcp-go/mcp"
-)
-
-// ① 创建 stdio client：spawn 一个本地 MCP server 子进程
-c, err := client.NewStdioMCPClient("go", []string{}, "run", "/path/to/server/main.go")
-if err != nil {
-    log.Fatal(err)
-}
-defer c.Close()
-
-ctx := context.Background()
-
-// ② 握手
-_, err = c.Initialize(ctx, mcp.InitializeRequest{
-    Params: mcp.InitializeRequestParams{
-        ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
-        ClientInfo: mcp.Implementation{Name: "my-client", Version: "1.0.0"},
-    },
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-// ③ 发现工具（tools/list）
-tools, err := c.ListTools(ctx, mcp.ListToolsRequest{})
-for _, tool := range tools.Tools {
-    fmt.Printf("- %s: %s\n", tool.Name, tool.Description)
-}
-
-// ④ 调用工具（tools/call）
-result, err := c.CallTool(ctx, mcp.CallToolRequest{
-    Params: mcp.CallToolRequestParams{
-        Name:      "list_files",
-        Arguments: map[string]any{"path": ".", "recursive": false},
-    },
-})
-```
-
-**和 function calling 怎么衔接**：MCP 只负责「发现工具 + 调用工具」，模型要不要调、调哪个，仍由 function calling 决定。落地时把 `ListTools()` 返回的每个 tool（有 `Name` + `Description` + `InputSchema`）转成上一章讲的 `Tool`（function calling 的 `tools` 数组），模型发起 tool_call 时再用 `CallTool()` 转发执行，结果回传。相当于 MCP 替代了你手写 `getWeather` 那部分，工具来源变成了「随时可插拔的 server」。
-
-### 方式二：配置层面（Claude Code 连 MCP server）
-
-如果只是想让 **Claude Code** 用上某个 MCP server（而不是自己的 Go 程序），不用写代码，配置即可。
-
-命令行添加：
-
-```bash
-claude mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /path/to/dir
-```
-
-或直接写进 `~/.claude/settings.json` 的 `mcpServers` 字段（`claude mcp add` 本质就是改这里）：
-
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
-    }
-  }
-}
-```
-
-HTTP 类型的 server 用 `--transport http` 或 `url` 字段配置。配置完重启 Claude Code，对话里就能让它调用这些 MCP 工具。
+当前仓库只实现 `config.StdioMCPClient`，不支持 MCP HTTP transport。实际代码、配置和支持矩阵见 [mcp-skill-use.md](mcp-skill-use.md) 与 [mcp-stdio.md](mcp-stdio.md)。
 
 ## 六、Skill（项目自定义能力扩展）
 
-### 概念
+当前 `config.Skill` 是一份可注入 system prompt 的 Markdown 工作流说明，保存名称、描述、正文和来源路径。它不包含 Tool handler，也不执行代码。
 
-function calling 里的工具是「散」的——每个函数独立定义。**Skill** 是把「一段 system 指令 + 一组 tools + 对应的处理函数」打包成一个**可复用的能力模块**，客户端加载多个 skill，自动聚合工具、按需分发执行。
-
-类比 Java：Skill 像一个「可插拔的 Service 模块」，每个模块自带配置（prompt 片段）、能力声明（tools）和实现（handler）。
-
-### 设计
-
-```go
-// Skill 代表一个可复用的能力模块
-type Skill struct {
-    Name        string                 // 能力名，如 "weather"
-    Description string                 // 能力说明，注入 system prompt 让模型知道何时用
-    Tools       []Tool                 // 该能力提供的 function calling 工具
-    Handler     map[string]ToolHandler // 工具名 -> 执行函数
-}
-
-// ToolHandler 是工具的执行函数：吃 JSON 参数，吐结果文本
-type ToolHandler func(args map[string]any) (string, error)
+```text
+Skill → 告诉模型何时、为何、按什么规则使用工具
+Tool  → 提供真实执行入口
+MCP   → 为外部 Tool 提供标准发现和调用协议
 ```
 
-客户端加一个 skill 注册表：
-
-```go
-type LLM struct {
-    // ... 原有字段
-    skills []Skill
-}
-
-// RegisterSkill 注册一个能力模块
-func (llm *LLM) RegisterSkill(s Skill) { llm.skills = append(llm.skills, s) }
-
-// aggregateTools 聚合所有已注册 skill 的工具，作为一次请求的 tools
-func (llm *LLM) aggregateTools() []Tool {
-    var all []Tool
-    for _, s := range llm.skills {
-        all = append(all, s.Tools...)
-    }
-    return all
-}
-
-// dispatch 根据工具名找到对应 skill 的处理函数并执行
-func (llm *LLM) dispatch(name string, args map[string]any) (string, error) {
-    for _, s := range llm.skills {
-        if h, ok := s.Handler[name]; ok {
-            return h(args)
-        }
-    }
-    return "", fmt.Errorf("unknown tool: %s", name)
-}
-```
-
-使用示例：
-
-```go
-c := config.NewClient()
-
-c.RegisterSkill(config.Skill{
-    Name:        "weather",
-    Description: "查询城市天气",
-    Tools:       []config.Tool{ /* get_weather 的 tools 声明 */ },
-    Handler: map[string]config.ToolHandler{
-        "get_weather": func(args map[string]any) (string, error) {
-            return args["location"].(string) + "今天晴，25°C", nil
-        },
-    },
-})
-
-// 请求时自动带上 aggregateTools() 的结果，收到 tool_call 用 dispatch() 分发
-```
-
-### 和 function calling / MCP 的关系
-
-| 层 | 作用 |
-|---|---|
-| function calling | 底层机制：模型决定调哪个工具、给什么参数 |
-| MCP | 标准化工具来源：从任意 MCP server 发现/调用工具 |
-| Skill | 工程化组织：把 prompt + tools + handler 打包成可复用模块 |
-
-三者可组合：Skill 里的 `Tools` 可以来自硬编码，也可以来自 MCP server 的 `ListTools()`；`Handler` 可以直接执行，也可以转发给 MCP 的 `CallTool()`。
+Skill 的加载、路由和与 Tool/MCP 的组合方式见 [mcp-skill-use.md](mcp-skill-use.md)。
 
 ## 七、Java 对照
 

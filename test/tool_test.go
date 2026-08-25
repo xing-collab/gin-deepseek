@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -370,25 +371,74 @@ func TestLoadSkillUsesMarkdownTitle(t *testing.T) {
 	}
 }
 
+func TestSkillRegistryDiscoversFrontmatterAndLoadsOnDemand(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "weather")
+	if err := os.MkdirAll(filepath.Join(skillDir, "references"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	skillPath := filepath.Join(skillDir, "SKILL.md")
+	content := "---\nname: weather\ndescription: 查询天气时使用真实天气工具。\n---\n\n# 天气查询\n\n先确认城市。"
+	if err := os.WriteFile(skillPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "references", "fields.md"), []byte("weather_code"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := NewSkillRegistry()
+	if err := registry.Discover(root); err != nil {
+		t.Fatal(err)
+	}
+	summaries := registry.Summaries()
+	if len(summaries) != 1 || summaries[0].Name != "weather" || summaries[0].Description != "查询天气时使用真实天气工具。" {
+		t.Fatalf("summaries = %#v", summaries)
+	}
+	if catalog := registry.CatalogPrompt(); !strings.Contains(catalog, "weather: 查询天气时使用真实天气工具。") {
+		t.Fatalf("catalog = %q", catalog)
+	}
+	prompt, err := registry.Prompt("weather")
+	if err != nil || strings.Contains(prompt, "description:") || !strings.Contains(prompt, "先确认城市") {
+		t.Fatalf("prompt=%q err=%v", prompt, err)
+	}
+	resource, err := registry.ReadResource("weather", "references/fields.md")
+	if err != nil || resource != "weather_code" {
+		t.Fatalf("resource=%q err=%v", resource, err)
+	}
+	if _, err := registry.ReadResource("weather", "../secret.txt"); err == nil {
+		t.Fatal("expected path traversal error")
+	}
+}
+
+func TestRegisterSkillToolsReadsIndexedSkill(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "time")
+	if err := os.MkdirAll(skillDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nname: time-awareness\ndescription: 时间相关任务。\n---\n\n# 时间感知\n\n调用时间工具。"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	skills := NewSkillRegistry()
+	if err := skills.Discover(root); err != nil {
+		t.Fatal(err)
+	}
+	tools := NewToolRegistry()
+	if err := RegisterSkillTools(tools, skills); err != nil {
+		t.Fatal(err)
+	}
+	result, err := tools.Execute(context.Background(), AgentToolCall{
+		Name:      "read_skill",
+		Arguments: map[string]any{"name": "time-awareness"},
+	})
+	if err != nil || !strings.Contains(result, "name: time-awareness") || !strings.Contains(result, "调用时间工具") {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+}
+
 func TestMCPToolNameRejectsUnsupportedName(t *testing.T) {
 	if got := MCPToolName("服务", "天气"); got != "" {
 		t.Fatalf("tool name = %q, want empty", got)
-	}
-}
-
-func TestContainsTimeIntent(t *testing.T) {
-	for _, input := range []string{"早上好", "现在几点", "Good evening"} {
-		if !ContainsTimeIntent(input) {
-			t.Fatalf("containsTimeIntent(%q) = false", input)
-		}
-	}
-	if ContainsTimeIntent("帮我写一首诗") {
-		t.Fatal("unexpected time intent")
-	}
-}
-
-func TestJoinSkillPrompts(t *testing.T) {
-	if got := JoinSkillPrompts(" A ", "", "B "); got != "A\n\nB" {
-		t.Fatalf("joined prompt = %q", got)
 	}
 }

@@ -1,5 +1,7 @@
 # MCP 与 Skill 接入指导
 
+本项目已内置 `config.StdioMCPClient`，可直接启动 stdio MCP 子进程并完成 `initialize`、`tools/list` 和 `tools/call`。Open-Meteo 天气服务的实际配置、环境变量和客户端 JSON 见 [mcp-stdio.md](mcp-stdio.md)。下文的 `MCPClient` 接口仍适用于其他 MCP SDK 或传输实现。
+
 本文说明当前 Agent 框架如何接入本地 Go 工具、MCP 工具和 Skill。三者的职责不同：
 
 | 能力 | 作用 | 接入位置 |

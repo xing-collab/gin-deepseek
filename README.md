@@ -20,6 +20,7 @@
 - 双协议客户端：同时保留 Chat Completions 客户端和 Responses API 客户端。
 - 流式接口：底层客户端提供回调、channel 和迭代器三种流式 API。
 - 自动化测试：使用标准库 testing 和 httptest.Server，不访问真实 API。
+- stdio MCP：启动 Open-Meteo 天气服务，自动发现并注册地区和经纬度天气工具。
 
 ## 快速开始
 
@@ -40,6 +41,8 @@ Bash：
 export OPENAI_API_KEY="sk-..."
 go run .
 ```
+
+CLI 默认还会启动 `C:\work\code\tool\mcp\dist\index.js`。首次使用前在天气 MCP 项目执行 `npm run build`；路径配置和禁用方式见 [docs/mcp-stdio.md](docs/mcp-stdio.md)。
 
 DEEPSEEK_API_KEY 供 Responses API 客户端使用。不要把真实 API Key 写入源码、测试、文档或日志。
 
@@ -72,6 +75,7 @@ ai-test/
 │   ├── character.go         # 角色卡加载、状态机和 system prompt
 │   ├── memory.go            # 客户端短期历史与裁剪
 │   ├── mcp.go               # MCP 工具发现与调用适配
+│   ├── mcp_stdio.go         # stdio 子进程、初始化和 JSON-RPC 调用
 │   ├── skill.go             # Skill Markdown 加载和注册
 │   ├── tool.go              # Tool 声明、时间/日期工具和处理器
 │   └── priestess.json       # 示例角色卡
@@ -81,6 +85,7 @@ ai-test/
 ├── docs/
 │   ├── agent-loop.md         # Agent loop 开发指导
 │   ├── mcp-skill-use.md      # MCP 与 Skill 接入指导
+│   ├── mcp-stdio.md          # Open-Meteo 服务和各客户端配置
 │   ├── tool-use.md           # 外部工具定义与注入使用手册
 │   ├── streaming-patterns.md # 流式接口说明
 │   └── api-formats-and-tools.md
@@ -234,7 +239,7 @@ loop := config.AgentLoop{
 
 底层 LLM 和 OpenAPIClient 都提供非流式、回调式、channel 式和 Go 迭代器式流式调用。详细说明见 [docs/streaming-patterns.md](docs/streaming-patterns.md) 和 [docs/api-formats-and-tools.md](docs/api-formats-and-tools.md)。
 
-MCP 工具发现、调用适配以及 Skill 加载方式见 [docs/mcp-skill-use.md](docs/mcp-skill-use.md)。
+MCP 工具发现、调用适配以及 Skill 加载方式见 [docs/mcp-skill-use.md](docs/mcp-skill-use.md)；本项目实际使用的 stdio 天气服务配置见 [docs/mcp-stdio.md](docs/mcp-stdio.md)。
 
 ## 角色卡运行时
 
@@ -280,7 +285,7 @@ go vet ./...
 
 - 流式 AgentEvent，统一输出思考、正文、工具开始/结束和最终答案；
 - 每工具独立超时、重试、幂等键和审批策略；
-- MCP 工具发现与调用适配器；
+- MCP 多服务配置、重连和资源/提示词支持；
 - transcript 压缩和长期记忆写回；
 - 子 Agent executor；
 - Chat/Responses 两种协议的统一 AgentModel 适配层。

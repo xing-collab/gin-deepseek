@@ -63,7 +63,7 @@ func RegisterMCPTools(ctx context.Context, registry *ToolRegistry, client MCPCli
 			inputSchema = EmptyObjectSchema()
 		}
 		handler := func(callCtx context.Context, args map[string]any) (string, error) {
-			result, callErr := client.CallTool(callCtx, originalName, args)
+			result, callErr := callMCPTool(callCtx, client, originalName, args)
 			if callErr != nil {
 				return "", fmt.Errorf("调用 MCP 工具 %q: %w", originalName, callErr)
 			}
@@ -88,6 +88,58 @@ func RegisterMCPTools(ctx context.Context, registry *ToolRegistry, client MCPCli
 		}
 	}
 	return nil
+}
+
+// callMCPTool adds a small compatibility fallback for the Open-Meteo server.
+// Its geocoder currently accepts English names more reliably than Chinese
+// names, even when countryCode=CN is supplied. The fallback is deliberately
+// limited to get_weather_by_region and only runs after the original call
+// fails, so unrelated MCP tools retain their original behavior.
+func callMCPTool(ctx context.Context, client MCPClient, name string, args map[string]any) (any, error) {
+	result, err := client.CallTool(ctx, name, args)
+	if err == nil || name != "get_weather_by_region" {
+		return result, err
+	}
+
+	region, ok := args["region"].(string)
+	if !ok {
+		return nil, err
+	}
+	for _, alias := range weatherRegionAliases(region) {
+		retryArgs := cloneToolArguments(args)
+		retryArgs["region"] = alias
+		if retryResult, retryErr := client.CallTool(ctx, name, retryArgs); retryErr == nil {
+			return retryResult, nil
+		}
+	}
+	return nil, err
+}
+
+func weatherRegionAliases(region string) []string {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		return nil
+	}
+	aliases := map[string]string{
+		"上海": "Shanghai", "上海市": "Shanghai",
+		"北京": "Beijing", "北京市": "Beijing",
+		"广州": "Guangzhou", "广州市": "Guangzhou",
+		"深圳": "Shenzhen", "深圳市": "Shenzhen",
+		"杭州": "Hangzhou", "杭州市": "Hangzhou",
+		"南京": "Nanjing", "南京市": "Nanjing",
+		"苏州": "Suzhou", "苏州市": "Suzhou",
+		"成都": "Chengdu", "成都市": "Chengdu",
+		"重庆": "Chongqing", "重庆市": "Chongqing",
+		"武汉": "Wuhan", "武汉市": "Wuhan",
+		"西安": "Xi'an", "西安市": "Xi'an",
+		"天津": "Tianjin", "天津市": "Tianjin",
+		"香港": "Hong Kong", "澳门": "Macao", "台北": "Taipei",
+	}
+	alias, ok := aliases[region]
+	if !ok || alias == region {
+		return nil
+	}
+	return []string{alias}
 }
 
 // MCPToolName 将 MCP 服务名和原始工具名组合为 Agent 可见名称。

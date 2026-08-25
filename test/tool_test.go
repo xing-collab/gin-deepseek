@@ -18,6 +18,7 @@ type mockMCPClient struct {
 	tools []MCPTool
 	name  string
 	args  map[string]any
+	calls []map[string]any
 }
 
 func (m *mockMCPClient) ListTools(context.Context) ([]MCPTool, error) {
@@ -27,7 +28,26 @@ func (m *mockMCPClient) ListTools(context.Context) ([]MCPTool, error) {
 func (m *mockMCPClient) CallTool(_ context.Context, name string, args map[string]any) (any, error) {
 	m.name = name
 	m.args = args
+	m.calls = append(m.calls, map[string]any{"name": name, "args": args})
 	return map[string]any{"ok": true}, nil
+}
+
+type weatherAliasMCPClient struct {
+	tools []MCPTool
+	calls []string
+}
+
+func (m *weatherAliasMCPClient) ListTools(context.Context) ([]MCPTool, error) {
+	return m.tools, nil
+}
+
+func (m *weatherAliasMCPClient) CallTool(_ context.Context, _ string, args map[string]any) (any, error) {
+	region, _ := args["region"].(string)
+	m.calls = append(m.calls, region)
+	if region == "上海" {
+		return nil, errors.New("No location found for: 上海")
+	}
+	return "Shanghai weather", nil
 }
 
 func TestChatCompletionsInvokeWithSharedTools(t *testing.T) {
@@ -297,6 +317,28 @@ func TestRegisterMCPTools(t *testing.T) {
 	}
 	if client.name != "forecast" || client.args["city"] != "上海" {
 		t.Fatalf("MCP call = %q %#v", client.name, client.args)
+	}
+}
+
+func TestRegisterMCPToolsRetriesChineseWeatherRegionWithEnglishAlias(t *testing.T) {
+	client := &weatherAliasMCPClient{tools: []MCPTool{{
+		Name:        "get_weather_by_region",
+		Description: "查询天气。",
+		InputSchema: map[string]any{"type": "object"},
+	}}}
+	registry := NewToolRegistry()
+	if err := RegisterMCPTools(context.Background(), registry, client, "weather"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := registry.Execute(context.Background(), AgentToolCall{
+		Name:      "mcp_weather_get_weather_by_region",
+		Arguments: map[string]any{"region": "上海"},
+	})
+	if err != nil || result != "Shanghai weather" {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+	if got, want := fmt.Sprint(client.calls), "[上海 Shanghai]"; got != want {
+		t.Fatalf("calls=%s, want %s", got, want)
 	}
 }
 

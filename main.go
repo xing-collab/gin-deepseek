@@ -53,12 +53,13 @@ func main() {
 		return
 	}
 
-	toolRegistry, err := buildToolRegistry()
+	toolRegistry, closeMCP, err := buildToolRegistry(context.Background())
 	if err != nil {
 		logger.Printf("注册 Agent 工具失败: %v", err)
 		fmt.Println("注册 Agent 工具失败:", err)
 		return
 	}
+	defer closeMCP()
 	var conversation []config.AgentMessage
 	fmt.Println("=== Agent Loop 对话（输入 exit 退出）===")
 	scanner := bufio.NewScanner(os.Stdin)
@@ -129,7 +130,7 @@ func main() {
 }
 
 // buildToolRegistry 演示如何在 config 包外定义方法，并注册给 Agent 调用。
-func buildToolRegistry() (*config.ToolRegistry, error) {
+func buildToolRegistry(ctx context.Context) (*config.ToolRegistry, func(), error) {
 	registry := config.NewToolRegistry()
 	tools := []struct {
 		name        string
@@ -164,10 +165,33 @@ func buildToolRegistry() (*config.ToolRegistry, error) {
 			tool.handler,
 			tool.parameters...,
 		); err != nil {
-			return nil, fmt.Errorf("注册工具 %q: %w", tool.name, err)
+			return nil, func() {}, fmt.Errorf("注册工具 %q: %w", tool.name, err)
 		}
 	}
-	return registry, nil
+
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("MCP_WEATHER_ENABLED")), "false") {
+		return registry, func() {}, nil
+	}
+	mcpPath := strings.TrimSpace(os.Getenv("MCP_WEATHER_PATH"))
+	if mcpPath == "" {
+		mcpPath = `C:\work\code\tool\mcp\dist\index.js`
+	}
+	mcpCommand := strings.TrimSpace(os.Getenv("MCP_NODE_COMMAND"))
+	if mcpCommand == "" {
+		mcpCommand = "node"
+	}
+	mcpClient, err := config.NewStdioMCPClient(ctx, config.StdioMCPConfig{
+		Command: mcpCommand,
+		Args:    []string{mcpPath},
+	})
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("连接天气 MCP 服务失败（可设置 MCP_WEATHER_ENABLED=false 禁用）: %w", err)
+	}
+	if err := config.RegisterMCPTools(ctx, registry, mcpClient, "weather"); err != nil {
+		_ = mcpClient.Close()
+		return nil, func() {}, fmt.Errorf("注册天气 MCP 工具失败: %w", err)
+	}
+	return registry, func() { _ = mcpClient.Close() }, nil
 }
 
 // 以下方法是普通业务函数，不需要依赖 Agent 的参数类型。
